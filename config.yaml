@@ -1,0 +1,49 @@
+# For physics topics, use the specific subtopics, e.g. "Astrophysics"
+topic: "Computer Science"
+# An empty list here will include all categories in a topic
+# Use the natural language names of the topics, found here: https://arxiv.org
+# Including more categories will result in more calls to the large language model
+categories: ["Artificial Intelligence", "Computation and Language", "Machine Learning"]
+
+# Relevance score threshold. abstracts that receive a score less than this from the large language model
+# will have their papers filtered out.
+#
+# Must be within 1-10
+threshold: 7
+
+# Editorial worker. The implementation imports pi agent from this project's
+# local node_modules. Provider credentials are read from environment variables.
+pi_agent:
+  provider: "anthropic"
+  model: "configured-model-id"
+  timeout_ms: 120000
+  max_retries: 2
+  instructions: |
+    Keep the report concise enough to scan in ten minutes. Never fabricate
+    experimental numbers; state when an abstract does not provide metrics.
+
+# A natural language statement that the large language model will use to judge which papers are relevant 
+#
+# For example:
+#     "I am interested in complexity theory papers that establish upper bounds"
+#     "gas chromatography, mass spectrometry"
+#     "making lots of money"
+#
+# This can be empty, which just return a full list of papers with no judgement or filtering,
+# in whatever order arXiv responds with.
+interest: |
+  Focus ONLY on core architectural innovations and foundational theoretical understanding of Large Language Models.
+
+  ### IN-SCOPE (High Interest):
+  1. Novel Model Architectures & Components:
+     - Core layers & sequence modeling: Transformer variants, Attention mechanisms, State Space Models (Mamba, S4, etc.), Recurrent/Linear Attention (Gated DeltaNet, RWKV, RetNet, KDA), Sparse Attention, Mixture of Experts (MoE), and Hybrid/Hyper-Connection/Residual architectures.
+     - Micro-architectural mechanics: Positional embeddings (RoPE, ALiBi), Normalization layers, Activation functions, KV-cache efficiency (MLA, GQA), Tokenization-free / Byte-level architectures.
+  2. Physics & Theory of LLMs:
+     - Scaling laws, training dynamics, loss landscapes, optimization stability, grokking, and phase transitions.
+     - Mechanistic interpretability, internal representation mechanics, capacity limits, and memory/generalization theory.
+
+  ### OUT-OF-SCOPE (Strict Reject):
+  - Only interested in architectures about language models, not vision, audio, or multimodal models.
+  - Agents & Frameworks: Multi-agent systems, harness frameworks, tool-use, workflow orchestrators, GUI agents, prompt engineering techniques.
+  - Downstream Applications: Domain-specific models (medical, legal, finance), information extraction, summarization, translation, code generation apps, RAG pipelines, or standard benchmarking.
+  - Pure Fine-Tuning/Alignment/Post-train: Standard SFT, RLHF, DPO, or dataset curation UNLESS it introduces a novel model architecture or uncovers new training physics.
