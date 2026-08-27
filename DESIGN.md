@@ -25,7 +25,7 @@
 
 - Node.js 20+、pnpm、TypeScript、`tsx`（开发运行）和 `tsc`（构建）。`package.json` 使用 `packageManager` 固定 pnpm 版本，并提交 `pnpm-lock.yaml`。
 - `yaml` 解析配置，`zod` 校验配置和 LLM JSON，`cheerio` 解析 papers.cool HTML，`p-limit` 控制并发，`date-fns`/原生 UTC 日期函数计算 ISO 周。
-- SQLite（推荐 `better-sqlite3`）作为单文件缓存和运行记录；不依赖外部服务。
+- SQLite（使用无需本机编译的 `sql.js` WASM 实现）作为单文件缓存和运行记录；不依赖外部服务。
 - Markdown 使用模板渲染（例如 `handlebars` 或小型纯函数），避免把未经转义的标题当成 Markdown 标记。
 - pi agent 使用 `@mariozechner/pi-agent-core`，模型/API 抽象使用 `@mariozechner/pi-ai`；两者通过 `pnpm add` 声明在 `dependencies` 中并由 TypeScript 直接 import，测试替身放在 `devDependencies` 中。生产代码不依赖 `@mariozechner/pi-coding-agent` CLI。
 

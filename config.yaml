@@ -5,6 +5,15 @@ topic: "Computer Science"
 # Including more categories will result in more calls to the large language model
 categories: ["Artificial Intelligence", "Computation and Language", "Machine Learning"]
 
+# Source provider: papers.cool (HTML) or arxiv (Export API)
+source:
+  provider: "papers.cool"
+  base_url: "https://papers.cool"
+  arxiv_base_url: "https://export.arxiv.org"
+  request_delay_ms: 400
+  timeout_ms: 20000
+  user_agent: "weekly-digest/0.1"
+
 # Relevance score threshold. abstracts that receive a score less than this from the large language model
 # will have their papers filtered out.
 #
