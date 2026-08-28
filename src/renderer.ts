@@ -12,35 +12,41 @@ const md = (s: string): string =>
         .replace(/\r\n/g, '\n')
         .replace(/\n{3,}/g, '\n\n');
 
-const link = (url: string): string =>
-    /^https:\/\/(?:arxiv\.org|www\.arxiv\.org)\//.test(url) ? url : '#';
+/** Normalize export.arxiv.org mirrors onto the whitelisted arxiv.org origin. */
+const normalizeUrl = (url: string): string =>
+    url.replace(/^https:\/\/export\.arxiv\.org\//, 'https://arxiv.org/');
+
+const safeLink = (url: string): string | undefined => {
+    const normalized = normalizeUrl(url);
+    return /^https:\/\/(?:arxiv\.org|www\.arxiv\.org)\//.test(normalized) ||
+        /^https:\/\/papers\.cool\//.test(normalized)
+        ? normalized
+        : undefined;
+};
 
 export class MarkdownRenderer implements Renderer {
     readonly extension = 'md';
 
     render(document: DigestDocument): string {
-        const counts = new Map<string, number>();
-        document.papers.forEach((paper) =>
-            paper.relevance.categories.forEach((category) =>
-                counts.set(category, (counts.get(category) || 0) + 1),
-            ),
-        );
+        let out = `# Weekly arXiv Digest: ${document.week} — ${md(document.categoryName)}\n\n- Window: ${document.from} to ${document.to} (UTC)\n- Generated: ${document.generatedAt}\n- Config hash: \`${document.configHash}\`\n- Candidates: ${document.candidateCount}\n- Papers in this category: ${document.papers.length}\n\n`;
+        if (!document.papers.length) return out + '_No papers in this category._\n';
 
-        let out = `# Weekly arXiv Digest: ${document.week}\n\n- Window: ${document.from} to ${document.to} (UTC)\n- Generated: ${document.generatedAt}\n- Config hash: \`${document.configHash}\`\n- Candidates: ${document.candidateCount}\n- Included: ${document.includedCount}\n\n## Category counts\n\n`;
-        for (const category of document.categories) {
-            out += `- ${md(category.name)}: ${counts.get(category.id) || 0}\n`;
-        }
-        if (!document.papers.length) return out + '\n_No papers matched the threshold._\n';
-
-        out += '\n';
         for (const paper of document.papers) {
-            out += `## ${md(paper.title)}\n\n- **Category:** ${paper.relevance.categories
-                .map((category) => md(document.categories.find((item) => item.id === category)?.name || category))
-                .join(', ')}\n`;
-            if (paper.relevance.tags.length) {
-                out += `- **Tag:** ${paper.relevance.tags.map((tag) => '`' + tag + '`').join(', ')}\n`;
+            out += `## ${md(paper.title)}\n\n- **Category:** ${md(document.categoryName)}\n`;
+            // Tags are validated kebab-case values from the taxonomy contract,
+            // so they are safe inside inline code without escaping.
+            if (paper.classification.tags.length) {
+                out += `- **Tag:** ${paper.classification.tags.map((tag) => '`' + tag + '`').join(', ')}\n`;
             }
-            out += `- **Score:** ${paper.relevance.score}/10\n- **arXiv:** [${md(paper.arxivId)}](${link(paper.detailUrl)})\n- **Published:** ${paper.publishedAt.slice(0, 10)}\n\n### Abstract (English)\n${md(paper.abstractEn)}\n\n### 摘要（中文）\n${md(paper.translationZh)}\n\n`;
+            out += `- **Authors:** ${paper.authors.length ? paper.authors.map(md).join(', ') : 'Unknown'}\n`;
+            // arXiv IDs are validated structured identifiers, safe unescaped.
+            const arxivUrl = safeLink(paper.detailUrl);
+            out += `- **arXiv:** [${paper.arxivId}](${arxivUrl ?? '#'})\n`;
+            const sourceUrl = safeLink(paper.sourceUrl);
+            out += sourceUrl
+                ? `- **Source:** [${sourceUrl.startsWith('https://papers.cool/') ? 'papers.cool' : 'arXiv'}](${sourceUrl})\n`
+                : '- **Source:** [#](#)\n';
+            out += `- **Published:** ${paper.publishedAt.slice(0, 10)}\n\n### Abstract\n\n${md(paper.abstractEn)}\n\n`;
         }
         return out;
     }

@@ -6,9 +6,14 @@ import type { Config } from './config.js';
 import { createCrawler, type PaperCrawler } from './crawler.js';
 import { rowToPaper, Store } from './db.js';
 import { Logger, elapsed } from './log.js';
-import { agentVersion, scorePaper, translateAbstract, type PiInvoker } from './pi.js';
+import {
+    agentVersion,
+    classifyPaper,
+    CLASSIFICATION_PROMPT_VERSION,
+    type PiInvoker,
+} from './pi.js';
 import { MarkdownRenderer } from './renderer.js';
-import type { DigestDocument, DigestPaper, Paper, Window } from './types.js';
+import type { ClassifiedPaper, DigestDocument, Paper, Window } from './types.js';
 import { hash } from './util.js';
 
 export interface RunOptions {
@@ -17,16 +22,56 @@ export interface RunOptions {
     invoker?: PiInvoker;
     crawler?: PaperCrawler;
     logger?: Logger;
-    /** run the whole pipeline but skip writing the digest file */
+    /** run the whole pipeline but skip writing the digest files */
     dryRun?: boolean;
 }
 
 export interface RunResult {
     runId: string;
-    file?: string;
-    document: DigestDocument;
+    /** written digest files, one per category (empty in dry-run mode) */
+    files: string[];
+    /** one document per non-empty category, ordered by category id */
+    documents: DigestDocument[];
     errors: number;
     status: string;
+}
+
+export function configHash(cfg: Config): string {
+    return hash({
+        source: cfg.source,
+        window: cfg.window,
+        output: cfg.output,
+        pi_agent: cfg.pi_agent,
+        categories: cfg.resolvedCategories,
+    });
+}
+
+/**
+ * Classification cache key: any change to paper content, taxonomy, prompt
+ * version, agent package, provider, or model invalidates the old entries.
+ */
+export function classificationCacheKey(
+    paper: Paper,
+    cfg: Config,
+    taxonomyHash: string,
+    agentV: string,
+): string {
+    return hash({
+        id: paper.arxivId,
+        content: paper.contentHash,
+        taxonomy: taxonomyHash,
+        promptVersion: CLASSIFICATION_PROMPT_VERSION,
+        agentVersion: agentV,
+        provider: cfg.pi_agent.provider,
+        model: cfg.pi_agent.model,
+    });
+}
+
+function sortPapers(papers: ClassifiedPaper[]): ClassifiedPaper[] {
+    return papers.sort(
+        (a, b) =>
+            b.publishedAt.localeCompare(a.publishedAt) || a.arxivId.localeCompare(b.arxivId),
+    );
 }
 
 export async function runDigest(
@@ -36,34 +81,35 @@ export async function runDigest(
 ): Promise<RunResult> {
     const store = new Store(join(opts.root, '.cache/weekly-digest.sqlite'));
     const runId = randomUUID();
-    const configHash = hash(cfg);
+    const configHashValue = configHash(cfg);
     const startedAt = new Date().toISOString();
     const startedMs = Date.now();
     const logger = opts.logger ?? new Logger({ runId });
     const invoker = opts.invoker;
-    const version = agentVersion();
+    const taxonomy = cfg.topics;
+    const agentV = agentVersion();
 
     store.startRun({
         runId,
         week: window.week,
         from: window.from.toISOString(),
         to: window.to.toISOString(),
-        configHash,
+        configHash: configHashValue,
         startedAt,
     });
     logger.info('run_start', {
         week: window.week,
         from: window.from.toISOString().slice(0, 10),
         to: window.to.toISOString().slice(0, 10),
-        config_hash: configHash,
+        config_hash: configHashValue,
+        taxonomy_hash: taxonomy.hash.slice(0, 12),
         force: !!opts.force,
         dry_run: !!opts.dryRun,
     });
 
     let crawlErrorCount = 0;
     let newFetches = false;
-    let newScores = 0;
-    let newTranslations = 0;
+    let newClassifications = 0;
     let errors = 0;
 
     try {
@@ -76,6 +122,7 @@ export async function runDigest(
             force: opts.force,
             maxPapers: cfg.source.max_papers,
             concurrency: cfg.source.concurrency,
+            logger,
         });
         const papers = new Map<string, Paper>();
         for (const category of cfg.resolvedCategories) {
@@ -108,172 +155,164 @@ export async function runDigest(
             throw new Error(`Source unavailable: all list fetches failed (${crawlErrorCount} error(s))`);
         }
 
-        const categories = cfg.interestCategories.length
-            ? cfg.interestCategories
-            : [{ id: 'interest-general', name: 'General relevance', order: 1 }];
-
-        const concurrency = Math.max(1, cfg.source.concurrency ?? 4);
-        const limit = pLimit(concurrency);
+        // Classify every paper; cache hits never invoke the agent.
+        const classificationKeys = new Map<string, string>();
+        const limit = pLimit(Math.max(1, cfg.source.concurrency ?? 4));
         const tasks = [...papers.values()].map((paper) =>
-            limit(async (): Promise<DigestPaper | undefined> => {
+            limit(async (): Promise<ClassifiedPaper | undefined> => {
                 store.savePaper(paper);
-                let relevance: any;
-                if (!cfg.interest.trim()) {
-                    relevance = { score: 10, reason: 'No interest filter configured', categories: ['interest-general'], tags: [] };
-                } else {
-                    const key = hash({
-                        id: paper.arxivId,
-                        abstract: paper.contentHash,
-                        interest: cfg.interest,
-                        instructions: cfg.pi_agent.instructions,
-                        promptVersion: 'v1',
-                        agentVersion: version,
-                        provider: cfg.pi_agent.provider,
-                        model: cfg.pi_agent.model,
+                const key = classificationCacheKey(paper, cfg, taxonomy.hash, agentV);
+                classificationKeys.set(paper.arxivId, key);
+                const classifyMs = Date.now();
+                let classification = opts.force ? undefined : store.getClassification(key);
+                if (classification) {
+                    logger.debug('classify', {
+                        arxiv_id: paper.arxivId,
+                        category: classification.categories[0],
+                        cache_hit: true,
+                        elapsed_ms: elapsed(classifyMs),
                     });
-                    const scoreMs = Date.now();
-                    relevance = opts.force ? undefined : store.getRelevance(key);
-                    if (relevance) {
-                        logger.debug('score', { arxiv_id: paper.arxivId, cache_hit: true, elapsed_ms: elapsed(scoreMs) });
-                    } else {
-                        if (!invoker) throw new Error('No PiInvoker configured');
-                        try {
-                            relevance = await scorePaper(paper, cfg.interest, cfg.interestCategories, cfg.pi_agent, invoker);
-                            newScores += 1;
-                            store.saveRelevance(
-                                key,
-                                paper,
-                                hash(cfg.interest),
-                                {
-                                    promptVersion: 'v1',
-                                    agentVersion: version,
-                                    provider: cfg.pi_agent.provider,
-                                    model: cfg.pi_agent.model,
-                                },
-                                relevance,
-                            );
-                            logger.debug('score', { arxiv_id: paper.arxivId, cache_hit: false, elapsed_ms: elapsed(scoreMs) });
-                        } catch (error) {
-                            errors += 1;
-                            store.addLlmError(runId, 'score', paper.arxivId, error, cfg.pi_agent.max_retries);
-                            store.addRunPaper(runId, paper.arxivId, false, 'llm-error', 0);
-                            logger.warn('llm_error', {
-                                arxiv_id: paper.arxivId,
-                                stage: 'score',
-                                error_type: error instanceof Error ? error.name : 'Error',
-                                error: error instanceof Error ? error.message : String(error),
-                            });
-                            return undefined;
-                        }
-                    }
-                }
-                if (relevance.score < cfg.threshold) {
-                    store.addRunPaper(runId, paper.arxivId, false, 'below-threshold', 0);
-                    return undefined;
-                }
-
-                const translationKey = hash({
-                    id: paper.arxivId,
-                    abstract: paper.contentHash,
-                    lang: cfg.output.language,
-                    promptVersion: 'v1',
-                });
-                const translateMs = Date.now();
-                let translation = opts.force ? undefined : store.getTranslation(translationKey);
-                if (translation) {
-                    logger.debug('translate', { arxiv_id: paper.arxivId, cache_hit: true, elapsed_ms: elapsed(translateMs) });
                 } else {
-                    if (!invoker) throw new Error('No PiInvoker configured for translation');
+                    if (!invoker) throw new Error('No PiInvoker configured');
                     try {
-                        translation = await translateAbstract(paper, cfg.pi_agent, invoker, cfg.output.language);
-                        newTranslations += 1;
-                        store.saveTranslation(translationKey, paper, cfg.output.language, translation);
-                        logger.debug('translate', { arxiv_id: paper.arxivId, cache_hit: false, elapsed_ms: elapsed(translateMs) });
-                    } catch (error) {
-                        errors += 1;
-                        store.addLlmError(runId, 'translate', paper.arxivId, error, cfg.pi_agent.max_retries);
-                        store.addRunPaper(runId, paper.arxivId, false, 'translation-error', 0);
-                        logger.warn('llm_error', {
+                        classification = await classifyPaper(paper, taxonomy, cfg.pi_agent, invoker);
+                        newClassifications += 1;
+                        store.saveClassification(
+                            key,
+                            paper,
+                            {
+                                taxonomyHash: taxonomy.hash,
+                                promptVersion: CLASSIFICATION_PROMPT_VERSION,
+                                agentVersion: agentV,
+                                provider: cfg.pi_agent.provider,
+                                model: cfg.pi_agent.model,
+                            },
+                            classification,
+                        );
+                        logger.debug('classify', {
                             arxiv_id: paper.arxivId,
-                            stage: 'translate',
+                            category: classification.categories[0],
+                            cache_hit: false,
+                            elapsed_ms: elapsed(classifyMs),
+                        });
+                    } catch (error) {
+                        // A single classification failure must not lose the rest
+                        // of the run, but the run still reports the error.
+                        errors += 1;
+                        store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.pi_agent.max_retries);
+                        store.addRunPaper(runId, paper.arxivId, false, 'classify-error', 0, key);
+                        logger.warn('agent_error', {
+                            arxiv_id: paper.arxivId,
+                            stage: 'classify',
                             error_type: error instanceof Error ? error.name : 'Error',
                             error: error instanceof Error ? error.message : String(error),
                         });
                         return undefined;
                     }
                 }
-                return { ...paper, relevance, translationZh: translation };
+                return { ...paper, classification };
             }),
         );
 
-        const included = (await Promise.all(tasks)).filter(
-            (paper): paper is DigestPaper => paper !== undefined,
+        const classified = sortPapers(
+            (await Promise.all(tasks)).filter((paper): paper is ClassifiedPaper => paper !== undefined),
         );
-        included.sort(
-            (a, b) =>
-                b.relevance.score - a.relevance.score ||
-                b.publishedAt.localeCompare(a.publishedAt) ||
-                a.arxivId.localeCompare(b.arxivId),
+        classified.forEach((paper, index) =>
+            store.addRunPaper(runId, paper.arxivId, true, 'included', index, classificationKeys.get(paper.arxivId)),
         );
-        included.forEach((paper, index) => store.addRunPaper(runId, paper.arxivId, true, 'included', index));
 
-        // Byte-identical output on replay: when this run made no new network or LLM
-        // work, reuse the previous completed run's generation time so the digest
-        // file is stable across identical repeat runs. generatedAt always equals the
-        // run's ended_at so replays reproduce the exact same header.
-        const didWork = newFetches || newScores > 0 || newTranslations > 0;
+        // A paper with primary + secondary categories appears in both files.
+        const byCategory = new Map<string, ClassifiedPaper[]>();
+        for (const paper of classified) {
+            for (const categoryId of paper.classification.categories) {
+                const list = byCategory.get(categoryId) ?? [];
+                list.push(paper);
+                byCategory.set(categoryId, list);
+            }
+        }
+
+        // Byte-identical output on replay: when this run made no new network or
+        // agent work, reuse the previous completed run's generation time so the
+        // digest files are stable across identical repeat runs. generatedAt
+        // always equals the run's ended_at so replays reproduce the exact files.
+        const didWork = newFetches || newClassifications > 0;
         let generatedAt: string;
         if (didWork) {
             generatedAt = new Date().toISOString();
         } else {
-            const previous = store.latestRunForWeek(window.week, configHash);
+            const previous = store.latestRunForWeek(window.week, configHashValue);
             generatedAt = previous?.ended_at ?? new Date().toISOString();
         }
 
-        const document: DigestDocument = {
-            week: window.week,
-            from: window.from.toISOString().slice(0, 10),
-            to: window.to.toISOString().slice(0, 10),
-            generatedAt,
-            configHash,
-            candidateCount: papers.size,
-            includedCount: included.length,
-            categories,
-            papers: included,
-        };
+        const renderer = new MarkdownRenderer();
+        const documents: DigestDocument[] = [];
+        const files: string[] = [];
+        for (const categoryId of [...byCategory.keys()].sort()) {
+            documents.push({
+                week: window.week,
+                from: window.from.toISOString().slice(0, 10),
+                to: window.to.toISOString().slice(0, 10),
+                categoryId,
+                categoryName: taxonomy.topics[categoryId]?.name ?? categoryId,
+                generatedAt,
+                configHash: configHashValue,
+                candidateCount: papers.size,
+                papers: byCategory.get(categoryId)!,
+            });
+        }
 
-        const markdown = new MarkdownRenderer().render(document);
-        let file: string | undefined;
         if (!opts.dryRun) {
             const outDir = join(opts.root, cfg.output.directory);
             await mkdir(outDir, { recursive: true });
-            file = join(outDir, cfg.output.filename.replace('{week}', window.week));
-            const temporary = `${file}.tmp-${runId}`;
-            await writeFile(temporary, markdown, 'utf8');
-            await rename(temporary, file);
+            for (const document of documents) {
+                const markdown = renderer.render(document);
+                const file = join(
+                    outDir,
+                    cfg.output.filename
+                        .replace('{week}', window.week)
+                        .replace('{category}', document.categoryId),
+                );
+                // Atomic write: temp file + rename so readers never see partial output.
+                const temporary = `${file}.tmp-${runId}`;
+                await writeFile(temporary, markdown, 'utf8');
+                await rename(temporary, file);
+                files.push(file);
+                store.saveRunDocument(runId, window.week, document.categoryId, document, markdown, file);
+            }
+        } else {
+            for (const document of documents) {
+                store.saveRunDocument(
+                    runId,
+                    window.week,
+                    document.categoryId,
+                    document,
+                    renderer.render(document),
+                    '',
+                );
+            }
         }
-        store.saveRunDocument(runId, window.week, document, markdown, file ?? '');
 
         const status = errors > 0 || crawlErrorCount > 0 ? 'error' : 'ok';
         store.finishRun(runId, status, {
             candidates: papers.size,
-            included: included.length,
+            classified: classified.length,
+            categories: documents.length,
             errors,
             crawl_errors: crawlErrorCount,
             new_fetches: newFetches,
-            new_scores: newScores,
-            new_translations: newTranslations,
+            new_classifications: newClassifications,
             dry_run: !!opts.dryRun,
         }, generatedAt);
         logger.info('run_end', {
             status,
             candidates: papers.size,
-            included: included.length,
+            classified: classified.length,
+            categories: documents.length,
             errors,
             crawl_errors: crawlErrorCount,
             elapsed_ms: elapsed(startedMs),
         });
-        return { runId, file, document, errors: errors + crawlErrorCount, status };
+        return { runId, files, documents, errors: errors + crawlErrorCount, status };
     } catch (error) {
         store.finishRun(runId, 'error', {
             errors: 1,
@@ -289,7 +328,47 @@ export async function runDigest(
     }
 }
 
-export type RetryStage = 'fetch' | 'score' | 'translate';
+export interface PreviewResult {
+    runId: string;
+    week: string;
+    markdown: string;
+    documents: DigestDocument[];
+}
+
+/**
+ * Reproduce the stored snapshot of a completed run. Output is byte-stable and
+ * never rebuilt from "latest" cache entries.
+ */
+export function previewDigest(
+    root: string,
+    week: string,
+    categoryId?: string,
+): PreviewResult {
+    const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
+    try {
+        const run = store.latestRun(week);
+        if (!run) throw new Error(`No completed run for ${week}`);
+        const snapshots = store.getRunDocuments(run.run_id);
+        if (!snapshots.length) {
+            throw new Error(
+                `Run ${run.run_id} has no document snapshots; run the digest again to regenerate snapshots`,
+            );
+        }
+        const wanted = categoryId
+            ? snapshots.filter((snapshot) => snapshot.category_id === categoryId)
+            : snapshots;
+        if (!wanted.length) {
+            throw new Error(`No snapshot for category ${categoryId} in ${week}`);
+        }
+        const documents = wanted.map((snapshot) => JSON.parse(snapshot.document_json) as DigestDocument);
+        const markdown = wanted.map((snapshot) => String(snapshot.markdown ?? '')).join('');
+        return { runId: run.run_id, week, markdown, documents };
+    } finally {
+        store.close();
+    }
+}
+
+export type RetryStage = 'fetch' | 'classify';
 
 export interface RetryOptions {
     root: string;
@@ -311,7 +390,7 @@ export interface RetryResult {
 
 /**
  * Stage-scoped retry for a previously recorded run. Only the selected stage is
- * re-executed (for LLM stages, only the items that failed in that stage); a
+ * re-executed (classification retries only the papers that failed there); a
  * later `digest run` regenerates the digest from the refreshed caches.
  */
 export async function retryRun(
@@ -350,6 +429,7 @@ export async function retryRun(
                 force: true,
                 maxPapers: cfg.source.max_papers,
                 concurrency: cfg.source.concurrency,
+                logger,
             });
             const window: Window = {
                 from: new Date(target.from_date),
@@ -383,114 +463,57 @@ export async function retryRun(
         const invoker = opts.invoker;
         if (!invoker) throw new Error(`No PiInvoker configured for retry --stage ${stage}`);
 
-        if (stage === 'score') {
-            const failed = new Set(
-                store.llmErrorsForRun(targetRunId, 'score').map((entry) => entry.arxiv_id as string),
-            );
-            const targets = store
-                .papersForRun(targetRunId)
-                .map((row) => rowToPaper(row))
-                .filter((paper) => failed.has(paper.arxivId));
-            let succeeded = 0;
-            let failedCount = 0;
-            for (const paper of targets) {
-                try {
-                    const relevance = await scorePaper(paper, cfg.interest, cfg.interestCategories, cfg.pi_agent, invoker);
-                    const key = hash({
-                        id: paper.arxivId,
-                        abstract: paper.contentHash,
-                        interest: cfg.interest,
-                        instructions: cfg.pi_agent.instructions,
-                        promptVersion: 'v1',
-                        agentVersion: agentVersion(),
+        const taxonomy = cfg.topics;
+        const agentV = agentVersion();
+        const failed = new Set(
+            store.agentErrorsForRun(targetRunId, 'classify').map((entry) => entry.arxiv_id as string),
+        );
+        const targets = store
+            .papersForRun(targetRunId)
+            .map((row) => rowToPaper(row))
+            .filter((paper) => failed.has(paper.arxivId));
+        let succeeded = 0;
+        let failedCount = 0;
+        for (const paper of targets) {
+            try {
+                const classification = await classifyPaper(paper, taxonomy, cfg.pi_agent, invoker);
+                const key = classificationCacheKey(paper, cfg, taxonomy.hash, agentV);
+                store.saveClassification(
+                    key,
+                    paper,
+                    {
+                        taxonomyHash: taxonomy.hash,
+                        promptVersion: CLASSIFICATION_PROMPT_VERSION,
+                        agentVersion: agentV,
                         provider: cfg.pi_agent.provider,
                         model: cfg.pi_agent.model,
-                    });
-                    store.saveRelevance(
-                        key,
-                        paper,
-                        hash(cfg.interest),
-                        {
-                            promptVersion: 'v1',
-                            agentVersion: agentVersion(),
-                            provider: cfg.pi_agent.provider,
-                            model: cfg.pi_agent.model,
-                        },
-                        relevance,
-                    );
-                    succeeded += 1;
-                    logger.info('retry_item', { stage, arxiv_id: paper.arxivId, ok: true });
-                } catch (error) {
-                    failedCount += 1;
-                    store.addLlmError(runId, 'score', paper.arxivId, error, cfg.pi_agent.max_retries);
-                    logger.warn('retry_item', {
-                        stage,
-                        arxiv_id: paper.arxivId,
-                        ok: false,
-                        error: error instanceof Error ? error.message : String(error),
-                    });
-                }
+                    },
+                    classification,
+                );
+                succeeded += 1;
+                logger.info('retry_item', { stage, arxiv_id: paper.arxivId, ok: true });
+            } catch (error) {
+                failedCount += 1;
+                store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.pi_agent.max_retries);
+                logger.warn('retry_item', {
+                    stage,
+                    arxiv_id: paper.arxivId,
+                    ok: false,
+                    error: error instanceof Error ? error.message : String(error),
+                });
             }
-            const status = failedCount ? 'error' : 'ok';
-            store.finishRun(runId, status, { stage: 'score', retried: targets.length, succeeded, failed: failedCount, errors: failedCount });
-            logger.info('retry_end', {
-                stage,
-                retried: targets.length,
-                succeeded,
-                failed: failedCount,
-                status,
-                elapsed_ms: elapsed(startedMs),
-            });
-            return { runId, targetRunId, stage, retried: targets.length, succeeded, failed: failedCount, errors: failedCount, status };
         }
-
-        if (stage === 'translate') {
-            const failed = new Set(
-                store.llmErrorsForRun(targetRunId, 'translate').map((entry) => entry.arxiv_id as string),
-            );
-            const targets = store
-                .papersForRun(targetRunId)
-                .map((row) => rowToPaper(row))
-                .filter((paper) => failed.has(paper.arxivId));
-            let succeeded = 0;
-            let failedCount = 0;
-            for (const paper of targets) {
-                try {
-                    const translation = await translateAbstract(paper, cfg.pi_agent, invoker, cfg.output.language);
-                    const key = hash({
-                        id: paper.arxivId,
-                        abstract: paper.contentHash,
-                        lang: cfg.output.language,
-                        promptVersion: 'v1',
-                    });
-                    store.saveTranslation(key, paper, cfg.output.language, translation);
-                    succeeded += 1;
-                    logger.info('retry_item', { stage, arxiv_id: paper.arxivId, ok: true });
-                } catch (error) {
-                    failedCount += 1;
-                    store.addLlmError(runId, 'translate', paper.arxivId, error, cfg.pi_agent.max_retries);
-                    logger.warn('retry_item', {
-                        stage,
-                        arxiv_id: paper.arxivId,
-                        ok: false,
-                        error: error instanceof Error ? error.message : String(error),
-                    });
-                }
-            }
-            const status = failedCount ? 'error' : 'ok';
-            store.finishRun(runId, status, { stage: 'translate', retried: targets.length, succeeded, failed: failedCount, errors: failedCount });
-            logger.info('retry_end', {
-                stage,
-                retried: targets.length,
-                succeeded,
-                failed: failedCount,
-                status,
-                elapsed_ms: elapsed(startedMs),
-            });
-            return { runId, targetRunId, stage, retried: targets.length, succeeded, failed: failedCount, errors: failedCount, status };
-        }
-
-        throw new Error(`Unsupported retry stage: ${String(stage)}`);
+        const status = failedCount ? 'error' : 'ok';
+        store.finishRun(runId, status, { stage: 'classify', retried: targets.length, succeeded, failed: failedCount, errors: failedCount });
+        logger.info('retry_end', {
+            stage,
+            retried: targets.length,
+            succeeded,
+            failed: failedCount,
+            status,
+            elapsed_ms: elapsed(startedMs),
+        });
+        return { runId, targetRunId, stage, retried: targets.length, succeeded, failed: failedCount, errors: failedCount, status };
     } catch (error) {
         store.finishRun(runId, 'error', {
             errors: 1,

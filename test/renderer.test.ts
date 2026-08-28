@@ -1,50 +1,82 @@
 import { describe, expect, it } from 'vitest';
 import { MarkdownRenderer } from '../src/renderer.js';
-import type { DigestDocument, DigestPaper, InterestCategory } from '../src/types.js';
+import type { ClassifiedPaper, DigestDocument } from '../src/types.js';
 
-const categories: InterestCategory[] = [
-    { id: 'interest-1-novel-model-architectures', name: 'Novel Model Architectures & Components', order: 1 },
-];
-
-const paper = (overrides: Partial<DigestPaper> = {}): DigestPaper => ({
+const paper = (overrides: Partial<ClassifiedPaper> = {}): ClassifiedPaper => ({
     arxivId: '2401.01234',
     title: 'A Study of Scalable Attention',
-    authors: ['Alice Example'],
+    authors: ['Alice Example', 'Bob Sample'],
     categories: ['cs.LG'],
     abstractEn: 'We study attention and find it helps.',
-    publishedAt: '2024-01-01T00:00:00.000Z',
+    publishedAt: '2024-01-02T00:00:00.000Z',
     detailUrl: 'https://arxiv.org/abs/2401.01234',
-    sourceUrl: 'https://papers.cool/arxiv/cs.LG',
+    sourceUrl: 'https://papers.cool/arxiv/2401.01234',
     contentHash: 'hash',
-    relevance: { score: 9, reason: 'r', categories: ['interest-1-novel-model-architectures'], tags: [] },
-    translationZh: '我们研究了注意力机制。',
+    classification: { categories: ['llm-architecture', 'llm-physics'], tags: [] },
     ...overrides,
 });
 
-const document = (papers: DigestPaper[]): DigestDocument => ({
+const document = (papers: ClassifiedPaper[], overrides: Partial<DigestDocument> = {}): DigestDocument => ({
     week: '2024-W01',
     from: '2024-01-01',
     to: '2024-01-08',
+    categoryId: 'llm-architecture',
+    categoryName: '大模型架构',
     generatedAt: '2024-01-08T00:00:00.000Z',
     configHash: 'abc',
-    candidateCount: papers.length,
-    includedCount: papers.length,
-    categories,
+    candidateCount: 5,
     papers,
+    ...overrides,
 });
 
 describe('MarkdownRenderer', () => {
+    it('renders the header with window, generation time, config hash and counts', () => {
+        const out = new MarkdownRenderer().render(document([paper()], { candidateCount: 7 }));
+        expect(out).toContain('# Weekly arXiv Digest: 2024-W01 — 大模型架构');
+        expect(out).toContain('- Window: 2024-01-01 to 2024-01-08 (UTC)');
+        expect(out).toContain('- Generated: 2024-01-08T00:00:00.000Z');
+        expect(out).toContain('- Config hash: `abc`');
+        expect(out).toContain('- Candidates: 7');
+        expect(out).toContain('- Papers in this category: 1');
+    });
+
+    it('renders category, optional tag, authors, both links and the published date', () => {
+        const out = new MarkdownRenderer().render(
+            document([paper({ classification: { categories: ['llm-architecture'], tags: ['attention', 'state-space-model'] } })]),
+        );
+        expect(out).toContain('- **Category:** 大模型架构');
+        expect(out).toContain('- **Tag:** `attention`, `state-space-model`');
+        expect(out).toContain('- **Authors:** Alice Example, Bob Sample');
+        expect(out).toContain('- **arXiv:** [2401.01234](https://arxiv.org/abs/2401.01234)');
+        expect(out).toContain('- **Source:** [papers.cool](https://papers.cool/arxiv/2401.01234)');
+        expect(out).toContain('- **Published:** 2024-01-02');
+        expect(out).toContain('### Abstract');
+        expect(out).toContain('We study attention and find it helps\\.');
+    });
+
+    it('omits the tag line when there are no tags', () => {
+        const out = new MarkdownRenderer().render(document([paper()]));
+        expect(out).not.toContain('**Tag:**');
+    });
+
+    it('does not emit scores or translations', () => {
+        const out = new MarkdownRenderer().render(document([paper()]));
+        expect(out).not.toContain('Score');
+        expect(out).not.toContain('中文');
+    });
+
     it('escapes Markdown-significant characters in external text', () => {
-        const renderer = new MarkdownRenderer();
-        const out = renderer.render(
+        const out = new MarkdownRenderer().render(
             document([
                 paper({
                     title: '- Leading dash title',
-                    abstractEn: '- bullet line\n> quote line\n# heading line\nstate-of-the-art ~~strike~~ _italic_ *bold* [x](y)',
+                    authors: ['Eve *Evil*'],
+                    abstractEn: '- bullet line\n> quote line\n# heading line\nstate-of-the-art ~~strike~~ _italic_',
                 }),
             ]),
         );
         expect(out).toContain('## \\- Leading dash title');
+        expect(out).toContain('Eve \\*Evil\\*');
         expect(out).toContain('\\- bullet line');
         expect(out).toContain('\\> quote line');
         expect(out).toContain('\\# heading line');
@@ -53,55 +85,36 @@ describe('MarkdownRenderer', () => {
         expect(out).toContain('\\_italic\\_');
     });
 
-    it('collapses runaway blank lines from multi-line agent output', () => {
-        const renderer = new MarkdownRenderer();
-        const out = renderer.render(
-            document([
-                paper({
-                    abstractEn: 'Line one.\n\n\n\n\nLine two.',
-                }),
-            ]),
+    it('collapses runaway blank lines from multi-line abstracts', () => {
+        const out = new MarkdownRenderer().render(
+            document([paper({ abstractEn: 'Line one.\n\n\n\n\nLine two.' })]),
         );
-        // Dots are escaped for display-safety, so look for the escaped form.
         expect(out).not.toContain('\n\n\n\n');
         expect(out).toContain('Line one\\.\n\nLine two\\.');
     });
 
-    it('omits the tag line when there are no tags and keeps it when present', () => {
-        const renderer = new MarkdownRenderer();
-        const noTags = renderer.render(document([paper()]));
-        expect(noTags).not.toContain('**Tag:**');
-
-        const withTags = renderer.render(
-            document([paper({ relevance: { score: 9, reason: 'r', categories: ['interest-1-novel-model-architectures'], tags: ['state-space-model', 'efficient-attention'] } })]),
-        );
-        expect(withTags).toContain('**Tag:** `state-space-model`, `efficient-attention`');
-    });
-
-    it('only emits whitelisted https arxiv links', () => {
-        const renderer = new MarkdownRenderer();
-        const out = renderer.render(
+    it('only emits whitelisted links and normalizes the arXiv export mirror', () => {
+        const out = new MarkdownRenderer().render(
             document([
                 paper({
-                    detailUrl: 'https://evil.example/abs/2401.01234',
+                    detailUrl: 'https://export.arxiv.org/abs/2401.01234',
+                    sourceUrl: 'https://export.arxiv.org/abs/2401.01234',
                 }),
             ]),
         );
-        // Non-arxiv URLs are replaced with a safe placeholder.
-        expect(out).toContain('](#)');
-        expect(out).not.toContain('evil.example');
+        expect(out).toContain('(https://arxiv.org/abs/2401.01234)');
+        expect(out).not.toContain('export.arxiv.org');
 
-        // Whitelisted arxiv URLs are kept as-is.
-        const good = renderer.render(document([paper()]));
-        expect(good).toContain('(https://arxiv.org/abs/2401.01234)');
+        const evil = new MarkdownRenderer().render(
+            document([paper({ detailUrl: 'https://evil.example/abs/2401.01234' })]),
+        );
+        expect(evil).toContain('](#)');
+        expect(evil).not.toContain('evil.example');
     });
 
-    it('renders category names in interest order and reports counts', () => {
-        const renderer = new MarkdownRenderer();
-        const out = renderer.render(
-            document([paper(), paper({ arxivId: '2401.01235' })]),
-        );
-        expect(out).toContain('Novel Model Architectures & Components: 2');
-        expect(out).toContain('**Category:** Novel Model Architectures & Components');
+    it('renders an empty category document with a placeholder', () => {
+        const out = new MarkdownRenderer().render(document([]));
+        expect(out).toContain('- Papers in this category: 0');
+        expect(out).toContain('_No papers in this category._');
     });
 });

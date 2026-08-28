@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 import { dirname, join } from 'node:path';
+import { loadEnvFile } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { Store } from './db.js';
 import { Logger } from './log.js';
 import { PiAgentAdapter } from './pi.js';
-import { retryRun, runDigest, type RetryStage } from './pipeline.js';
-import { MarkdownRenderer } from './renderer.js';
-import type { DigestDocument, DigestPaper } from './types.js';
+import { previewDigest, retryRun, runDigest, type RetryStage } from './pipeline.js';
 import { weekWindow } from './window.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+try {
+    loadEnvFile(join(root, '.env'));
+} catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+}
 const args = process.argv.slice(2);
 const command = args[0] || 'help';
 
@@ -28,8 +32,8 @@ async function main(): Promise<void> {
     if (command === 'help' || command === '--help') {
         console.log(
             'pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force] [--dry-run] [--debug] [--trace FILE]\n' +
-            'pnpm digest preview --week YYYY-Www [--config config.yaml]\n' +
-            'pnpm digest retry --run <run-id> --stage fetch|score|translate [--config config.yaml] [--debug]\n' +
+            'pnpm digest preview --week YYYY-Www [--category TOPIC_ID] [--config config.yaml]\n' +
+            'pnpm digest retry --run <run-id> --stage fetch|classify [--config config.yaml] [--debug]\n' +
             'pnpm digest cache stats|prune [--older-than DAYS]',
         );
         return;
@@ -51,13 +55,17 @@ async function main(): Promise<void> {
             invoker: new PiAgentAdapter(),
             logger: makeLogger(),
         });
+        const uniquePapers = new Set(
+            result.documents.flatMap((document) => document.papers.map((paper) => paper.arxivId)),
+        );
         console.log(
             JSON.stringify({
                 run_id: result.runId,
-                file: result.file ?? null,
+                files: result.files,
+                categories: result.documents.map((document) => document.categoryId),
                 stats: {
-                    candidates: result.document.candidateCount,
-                    included: result.document.includedCount,
+                    candidates: result.documents[0]?.candidateCount ?? 0,
+                    included: uniquePapers.size,
                     errors: result.errors,
                     status: result.status,
                     dry_run: flag('--dry-run'),
@@ -71,8 +79,8 @@ async function main(): Promise<void> {
     if (command === 'retry') {
         const runId = value('--run');
         const stage = value('--stage');
-        if (!runId || !['fetch', 'score', 'translate'].includes(stage || '')) {
-            throw new Error('Usage: retry --run RUN_ID --stage fetch|score|translate');
+        if (!runId || !['fetch', 'classify'].includes(stage || '')) {
+            throw new Error('Usage: retry --run RUN_ID --stage fetch|classify');
         }
         const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
         const result = await retryRun(cfg, runId, stage as RetryStage, {
@@ -93,7 +101,7 @@ async function main(): Promise<void> {
             }),
         );
         if (result.retried > 0) {
-            console.log('Run `pnpm digest run` again to regenerate the digest from refreshed caches.');
+            console.error('Run `pnpm digest run` again to regenerate the digest from refreshed caches.');
         }
         if (result.errors) process.exitCode = 1;
         return;
@@ -116,73 +124,17 @@ async function main(): Promise<void> {
     }
 
     if (command === 'preview') {
-        await preview(value('--week') || '');
+        // Preview never touches the network or the agent: it replays the stored
+        // run snapshots for one category or all of them.
+        const preview = previewDigest(root, value('--week') || '', value('--category'));
+        process.stdout.write(preview.markdown.endsWith('\n') ? preview.markdown : `${preview.markdown}\n`);
         return;
     }
 
     throw new Error(`Unknown command: ${command}`);
 }
 
-async function preview(week: string): Promise<void> {
-    const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
-    const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
-    try {
-        const run = store.latestRun(week);
-        if (!run) throw new Error(`No completed run for ${week}`);
-
-        // Prefer the run's stored snapshot: preview shows exactly the papers,
-        // scores, categories and translations that run produced.
-        const snapshot = store.getRunDocument(run.run_id);
-        if (snapshot?.document_json) {
-            const document = JSON.parse(snapshot.document_json) as DigestDocument;
-            console.log(new MarkdownRenderer().render(document));
-            return;
-        }
-
-        // Legacy fallback for runs recorded before snapshots existed.
-        const rows = store.listRunPapers(run.run_id).filter((row) => row.included);
-        const papers: DigestPaper[] = rows.map((row) => ({
-            ...row,
-            arxivId: row.arxiv_id,
-            version: row.version || undefined,
-            authors: JSON.parse(row.authors_json || '[]'),
-            categories: JSON.parse(row.categories_json || '[]'),
-            abstractEn: row.abstract_en,
-            publishedAt: row.published_at,
-            updatedAt: row.updated_at || undefined,
-            detailUrl: row.detail_url,
-            sourceUrl: row.source_url,
-            contentHash: row.content_hash,
-            relevance:
-                store.latestRelevance(row.arxiv_id) || {
-                    score: 10,
-                    reason: 'No interest filter configured',
-                    categories: ['interest-general'],
-                    tags: [],
-                },
-            translationZh: store.latestTranslation(row.arxiv_id) || '',
-        }));
-        const document = {
-            week,
-            from: run.from_date.slice(0, 10),
-            to: run.to_date.slice(0, 10),
-            generatedAt: run.ended_at,
-            configHash: run.config_hash,
-            candidateCount: JSON.parse(run.stats_json).candidates,
-            includedCount: papers.length,
-            categories: cfg.interestCategories.length
-                ? cfg.interestCategories
-                : [{ id: 'interest-general', name: 'General relevance', order: 1 }],
-            papers,
-        };
-        console.log(new MarkdownRenderer().render(document));
-    } finally {
-        store.close();
-    }
-}
-
 main().catch((error) => {
     console.error(`error: ${error instanceof Error ? error.message : error}`);
     process.exitCode = 1;
 });
-

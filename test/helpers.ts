@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +6,9 @@ import { afterEach, vi } from 'vitest';
 import { Store } from '../src/db.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
+const repoRoot = join(here, '..');
+
+export const repoTopicsPath = join(repoRoot, 'TOPICS.yaml');
 
 export function makeStore(): { store: Store; dir: string; cleanup: () => void } {
     const dir = mkdtempSync(join(tmpdir(), 'weekly-digest-test-'));
@@ -25,6 +28,23 @@ export function makeStore(): { store: Store; dir: string; cleanup: () => void } 
                 /* best effort */
             }
         },
+    };
+}
+
+/**
+ * Create a temp config directory containing the given config.yaml plus a copy
+ * of the repository TOPICS.yaml, mirroring the default sibling layout that
+ * loadConfig expects.
+ */
+export function makeConfigDir(configYaml: string): { dir: string; file: string; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'weekly-digest-config-'));
+    const file = join(dir, 'config.yaml');
+    writeFileSync(file, configYaml);
+    writeFileSync(join(dir, 'TOPICS.yaml'), readFileSync(repoTopicsPath, 'utf8'));
+    return {
+        dir,
+        file,
+        cleanup: () => rmSync(dir, { recursive: true, force: true }),
     };
 }
 

@@ -3,6 +3,7 @@ import pLimit from 'p-limit';
 import type { Paper } from './types.js';
 import { hash, sleep } from './util.js';
 import type { Store } from './db.js';
+import type { Logger } from './log.js';
 
 export type SourceProvider = 'papers.cool' | 'arxiv';
 export type CrawlStage = 'list' | 'detail' | 'fallback';
@@ -39,6 +40,8 @@ export interface CrawlerOptions {
   maxPapers?: number;
   /** max concurrent detail/fallback requests */
   concurrency?: number;
+  /** optional structured logger; detailed crawler events are debug-level */
+  logger?: Logger;
 }
 
 type FetchOptions = { accept: string };
@@ -49,6 +52,14 @@ const DEFAULT_CONCURRENCY = 4;
 
 function trimText(value: string | undefined | null): string {
   return (value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Extract the abstract text: normalize whitespace first so a leading
+ * newline/indent before the "Abstract:" label cannot defeat the prefix strip.
+ */
+function abstractText(value: string | undefined | null): string {
+  return trimText(value).replace(/^Abstract:\s*/i, '').trim();
 }
 
 function errorMessage(error: unknown): string {
@@ -123,6 +134,7 @@ class HttpClient {
   constructor(
     private readonly store: Store,
     private readonly opts: CrawlerOptions,
+    private readonly provider: SourceProvider,
   ) { }
 
   get stats(): { networkFetches: number; cacheHits: number } {
@@ -130,6 +142,7 @@ class HttpClient {
   }
 
   async text(url: string, options: FetchOptions): Promise<string> {
+    const requestStarted = Date.now();
     const cached = this.store.getFetch(url) as any;
     const cacheValid = cached?.expires_at && new Date(cached.expires_at).getTime() > Date.now();
     if (
@@ -140,6 +153,11 @@ class HttpClient {
       cached.body.length > 0
     ) {
       this.cacheHits += 1;
+      this.opts.logger?.debug('crawl_http_cache_hit', {
+        provider: this.provider,
+        url,
+        http_status: cached.status,
+      });
       return cached.body;
     }
 
@@ -148,6 +166,12 @@ class HttpClient {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
+        this.opts.logger?.debug('crawl_http_request', {
+          provider: this.provider,
+          url,
+          attempt: attempt + 1,
+          attempts,
+        });
         const controller = new AbortController();
         timer = setTimeout(() => controller.abort(), this.opts.timeout);
         const headers: Record<string, string> = {
@@ -158,6 +182,13 @@ class HttpClient {
         if (cached?.last_modified) headers['If-Modified-Since'] = cached.last_modified;
         this.networkFetches += 1;
         const response = await fetch(url, { signal: controller.signal, headers });
+        this.opts.logger?.debug('crawl_http_response', {
+          provider: this.provider,
+          url,
+          http_status: response.status,
+          attempt: attempt + 1,
+          elapsed_ms: Date.now() - requestStarted,
+        });
         if (response.status === 304 && cached?.body) {
           this.store.saveFetch(url, {
             status: 200,
@@ -166,6 +197,11 @@ class HttpClient {
             etag: cached.etag,
             lastModified: cached.last_modified,
             expiresAt: new Date(Date.now() + DAY_MS).toISOString(),
+          });
+          this.opts.logger?.debug('crawl_http_not_modified', {
+            provider: this.provider,
+            url,
+            elapsed_ms: Date.now() - requestStarted,
           });
           return cached.body;
         }
@@ -180,14 +216,39 @@ class HttpClient {
           expiresAt: new Date(Date.now() + DAY_MS).toISOString(),
         });
         if (this.opts.delay > 0) await sleep(this.opts.delay);
+        this.opts.logger?.debug('crawl_http_success', {
+          provider: this.provider,
+          url,
+          http_status: response.status,
+          bytes: Buffer.byteLength(body, 'utf8'),
+          elapsed_ms: Date.now() - requestStarted,
+        });
         return body;
       } catch (error) {
         lastError = error;
-        if (attempt + 1 < attempts) await sleep(250 * 2 ** attempt);
+        const retryDelayMs = 250 * 2 ** attempt;
+        if (attempt + 1 < attempts) {
+          this.opts.logger?.warn('crawl_http_retry', {
+            provider: this.provider,
+            url,
+            attempt: attempt + 1,
+            next_attempt: attempt + 2,
+            retry_delay_ms: retryDelayMs,
+            error: errorMessage(error),
+          });
+          await sleep(retryDelayMs);
+        }
       } finally {
         if (timer) clearTimeout(timer);
       }
     }
+    this.opts.logger?.error('crawl_http_failure', {
+      provider: this.provider,
+      url,
+      attempts,
+      elapsed_ms: Date.now() - requestStarted,
+      error: errorMessage(lastError),
+    });
     this.store.saveFetch(url, { status: 0, body: '', bodyHash: '', error: String(lastError) });
     throw lastError;
   }
@@ -202,13 +263,21 @@ export class PapersCoolCrawler implements PaperCrawler {
     options: CrawlerOptions,
   ) {
     this.opts = { ...options, baseUrl: baseUrl(options.baseUrl) };
-    this.http = new HttpClient(store, this.opts);
+    this.http = new HttpClient(store, this.opts, 'papers.cool');
   }
 
   async fetchCategory(category: string, from: Date, to: Date): Promise<CrawlResult> {
     const found = new Map<string, Paper>();
     const errors: CrawlError[] = [];
     const startFetches = this.http.stats.networkFetches;
+    const startCacheHits = this.http.stats.cacheHits;
+    this.opts.logger?.debug('crawl_category_start', {
+      provider: 'papers.cool',
+      category,
+      from: dateOnly(from),
+      to: dateOnly(to),
+      force: !!this.opts.force,
+    });
     // papers.cool's category endpoint is a daily page, so a weekly window
     // requires one request sequence for every day in the half-open interval.
     for (
@@ -235,6 +304,13 @@ export class PapersCoolCrawler implements PaperCrawler {
         }
         const $ = cheerio.load(html);
         const items = $('div.panel.paper');
+        this.opts.logger?.debug('crawl_list_page', {
+          provider: 'papers.cool',
+          category,
+          page,
+          date: dateOnly(day),
+          items: items.length,
+        });
         if (items.length === 0) break;
         for (const element of items.toArray()) {
           const paper = this.parseListItem($, element, url.toString());
@@ -246,6 +322,11 @@ export class PapersCoolCrawler implements PaperCrawler {
     }
 
     let candidates = [...found.values()];
+    this.opts.logger?.debug('crawl_candidates', {
+      provider: 'papers.cool',
+      category,
+      unique_candidates: candidates.length,
+    });
     if (this.opts.maxPapers && candidates.length > this.opts.maxPapers) {
       candidates = candidates.sort((a, b) => a.arxivId.localeCompare(b.arxivId)).slice(0, this.opts.maxPapers);
       errors.push({
@@ -262,9 +343,21 @@ export class PapersCoolCrawler implements PaperCrawler {
       limit(async () => {
         let merged = paper;
         const detailUrl = this.detailPageUrl(paper.arxivId, paper.version);
+        this.opts.logger?.debug('crawl_detail_start', {
+          provider: 'papers.cool',
+          category,
+          arxiv_id: paper.arxivId,
+          url: detailUrl,
+        });
         try {
           const html = await this.http.text(detailUrl, { accept: 'text/html,application/xhtml+xml' });
           merged = mergePaper(paper, this.parseDetail(html, detailUrl));
+          this.opts.logger?.debug('crawl_detail_success', {
+            provider: 'papers.cool',
+            category,
+            arxiv_id: paper.arxivId,
+            has_abstract: !!merged.abstractEn,
+          });
         } catch (error) {
           errors.push({
             stage: 'detail',
@@ -275,8 +368,19 @@ export class PapersCoolCrawler implements PaperCrawler {
           });
         }
         if (!merged.abstractEn) {
+          this.opts.logger?.debug('crawl_fallback_start', {
+            provider: 'papers.cool',
+            category,
+            arxiv_id: paper.arxivId,
+          });
           const fallback = await this.fetchArxivFallback(merged, category, errors);
           if (fallback) merged = mergePaper(merged, fallback);
+          this.opts.logger?.debug('crawl_fallback_result', {
+            provider: 'papers.cool',
+            category,
+            arxiv_id: paper.arxivId,
+            found: !!fallback?.abstractEn,
+          });
         }
         if (!merged.abstractEn) {
           errors.push({
@@ -292,6 +396,15 @@ export class PapersCoolCrawler implements PaperCrawler {
       }),
     );
     await Promise.all(tasks);
+
+    this.opts.logger?.debug('crawl_category_end', {
+      provider: 'papers.cool',
+      category,
+      papers: detailed.size,
+      errors: errors.length,
+      network_fetches: this.http.stats.networkFetches - startFetches,
+      cache_hits: this.http.stats.cacheHits - startCacheHits,
+    });
 
     return {
       papers: [...detailed.values()].sort((a, b) => a.arxivId.localeCompare(b.arxivId)),
@@ -351,11 +464,11 @@ export class PapersCoolCrawler implements PaperCrawler {
       $('h1.title, a.title-link, meta[name="citation_title"]').first().attr('content') ||
       $('h1.title, a.title-link').first().text(),
     );
-    const abstractEn = trimText(
+    const abstractEn = abstractText(
       (
         $('p.summary, blockquote.abstract, div.abstract, meta[name="citation_abstract"]').first().attr('content') ||
         $('p.summary, blockquote.abstract, div.abstract').first().text()
-      ).replace(/^Abstract:\s*/i, ''),
+      ),
     );
     const authors = $('a.author, meta[name="citation_author"]')
       .map((_, item) => trimText($(item).attr('content') || $(item).text()))
@@ -390,9 +503,7 @@ export class PapersCoolCrawler implements PaperCrawler {
     try {
       const html = await this.http.text(url, { accept: 'text/html,application/xhtml+xml' });
       const $ = cheerio.load(html);
-      const abstractEn = trimText(
-        $('blockquote.abstract').first().text().replace(/^Abstract:\s*/i, ''),
-      );
+      const abstractEn = abstractText($('blockquote.abstract').first().text());
       if (!abstractEn) {
         errors.push({
           stage: 'fallback',
@@ -427,13 +538,21 @@ export class ArxivCrawler implements PaperCrawler {
     options: CrawlerOptions,
   ) {
     this.opts = { ...options, baseUrl: baseUrl(options.baseUrl) };
-    this.http = new HttpClient(store, this.opts);
+    this.http = new HttpClient(store, this.opts, 'arxiv');
   }
 
   async fetchCategory(category: string, from: Date, to: Date): Promise<CrawlResult> {
     const found = new Map<string, Paper>();
     const errors: CrawlError[] = [];
     const startFetches = this.http.stats.networkFetches;
+    const startCacheHits = this.http.stats.cacheHits;
+    this.opts.logger?.debug('crawl_category_start', {
+      provider: 'arxiv',
+      category,
+      from: dateOnly(from),
+      to: dateOnly(to),
+      force: !!this.opts.force,
+    });
     const startDate = dateOnly(from).replace(/-/g, '');
     const endDate = dateOnly(new Date(to.getTime() - 1)).replace(/-/g, '');
     const pageSize = this.opts.pageSize ?? DEFAULT_PAGE_SIZE;
@@ -459,6 +578,13 @@ export class ArxivCrawler implements PaperCrawler {
       }
       const $ = cheerio.load(xml, { xmlMode: true });
       const entries = $('entry');
+      this.opts.logger?.debug('crawl_list_page', {
+        provider: 'arxiv',
+        category,
+        start,
+        page_size: pageSize,
+        entries: entries.length,
+      });
       if (entries.length === 0) break;
       for (const element of entries.toArray()) {
         const paper = this.parseEntry($, element, url.toString());
@@ -469,6 +595,11 @@ export class ArxivCrawler implements PaperCrawler {
     }
 
     let papers = [...found.values()];
+    this.opts.logger?.debug('crawl_candidates', {
+      provider: 'arxiv',
+      category,
+      unique_candidates: papers.length,
+    });
     if (this.opts.maxPapers && papers.length > this.opts.maxPapers) {
       papers = papers.sort((a, b) => a.arxivId.localeCompare(b.arxivId)).slice(0, this.opts.maxPapers);
       errors.push({
@@ -479,6 +610,14 @@ export class ArxivCrawler implements PaperCrawler {
       });
     }
 
+    this.opts.logger?.debug('crawl_category_end', {
+      provider: 'arxiv',
+      category,
+      papers: papers.length,
+      errors: errors.length,
+      network_fetches: this.http.stats.networkFetches - startFetches,
+      cache_hits: this.http.stats.cacheHits - startCacheHits,
+    });
     return {
       papers: papers.sort((a, b) => a.arxivId.localeCompare(b.arxivId)),
       errors,
@@ -563,6 +702,7 @@ export interface CreateCrawlerOptions {
   force?: boolean;
   maxPapers?: number;
   concurrency?: number;
+  logger?: Logger;
 }
 
 export function createCrawler(
@@ -580,6 +720,7 @@ export function createCrawler(
       force: opts.force,
       maxPapers: opts.maxPapers,
       concurrency: opts.concurrency,
+      logger: opts.logger,
     });
   }
   if (provider === 'arxiv') {
@@ -591,6 +732,7 @@ export function createCrawler(
       force: opts.force,
       maxPapers: opts.maxPapers,
       concurrency: opts.concurrency,
+      logger: opts.logger,
     });
   }
   throw new Error(`Unsupported source provider: ${String(provider)}`);

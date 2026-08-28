@@ -10,19 +10,30 @@ export default tseslint.config(
         ignores: ['dist/**', 'node_modules/**', '.cache/**', 'digests/**'],
     },
     {
-        files: ['src/**/*.ts', 'test/**/*.ts'],
+        files: ['src/**/*.ts'],
         languageOptions: {
             parserOptions: {
-                projectService: {
-                    // Test files live outside the build tsconfig (rootDir: src) but are
-                    // still linted with the default project settings.
-                    allowDefaultProject: ['test/*.ts'],
-                },
+                projectService: true,
                 tsconfigRootDir: rootDir,
             },
         },
         rules: {
             // TypeScript already enforces these; the lint pass focuses on hygiene.
+            '@typescript-eslint/no-explicit-any': 'off',
+            '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+            '@typescript-eslint/no-unused-expressions': 'off',
+        },
+    },
+    {
+        // Tests live outside the build tsconfig (rootDir: src); tsconfig.test.json types them.
+        files: ['test/**/*.ts', 'vitest.config.ts'],
+        languageOptions: {
+            parserOptions: {
+                project: ['tsconfig.test.json'],
+                tsconfigRootDir: rootDir,
+            },
+        },
+        rules: {
             '@typescript-eslint/no-explicit-any': 'off',
             '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
             '@typescript-eslint/no-unused-expressions': 'off',

@@ -1,9 +1,3 @@
-export type InterestCategory = {
-  id: string;
-  name: string;
-  order: number;
-};
-
 export type Paper = {
   arxivId: string;
   version?: string;
@@ -18,29 +12,32 @@ export type Paper = {
   contentHash: string;
 };
 
-export type RelevanceResult = {
-  score: number;
-  reason: string;
+/** Validated agent classification output. No score, no reason, no translation. */
+export type ClassificationResult = {
+  /** Canonical topic ids from TOPICS.yaml, primary first, at most `max_categories`. */
   categories: string[];
+  /** Lowercase kebab-case tags, at most `max_tags`; may be empty. */
   tags: string[];
   raw?: string;
 };
 
-export type DigestPaper = Paper & {
-  relevance: RelevanceResult;
-  translationZh: string;
+export type ClassifiedPaper = Paper & {
+  classification: ClassificationResult;
 };
 
+/** Snapshot for exactly one category file of one weekly run. */
 export type DigestDocument = {
   week: string;
   from: string;
   to: string;
+  categoryId: string;
+  categoryName: string;
   generatedAt: string;
   configHash: string;
+  /** Unique papers crawled for the run (shared across all category documents). */
   candidateCount: number;
-  includedCount: number;
-  categories: InterestCategory[];
-  papers: DigestPaper[];
+  /** Papers in this category, sorted by publishedAt desc then arxivId asc. */
+  papers: ClassifiedPaper[];
 };
 
 export interface Renderer {

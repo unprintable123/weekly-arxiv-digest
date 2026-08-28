@@ -1,58 +1,36 @@
-# For physics topics, use the specific subtopics, e.g. "Astrophysics"
-topic: "Computer Science"
-# An empty list here will include all categories in a topic
-# Use the natural language names of the topics, found here: https://arxiv.org
-# Including more categories will result in more calls to the large language model
-categories: ["Artificial Intelligence", "Computation and Language", "Machine Learning"]
+# Weekly arXiv digest example configuration.
+# Classification topics live in TOPICS.yaml; this file only controls crawling,
+# the time window, output locations, and the local pi agent connection.
+# Provider credentials are read from environment variables, never from YAML.
 
-# Source provider: papers.cool (HTML) or arxiv (Export API)
 source:
+  # Source provider: papers.cool (HTML) or arxiv (Export API)
   provider: "papers.cool"
   base_url: "https://papers.cool"
   arxiv_base_url: "https://export.arxiv.org"
+  # arXiv categories to crawl. Natural-language arXiv subject names
+  # ("Machine Learning") are also accepted and mapped to their IDs.
+  categories: ["cs.LG", "cs.CL", "cs.AI"]
   request_delay_ms: 400
   timeout_ms: 20000
   user_agent: "weekly-digest/0.1"
+  # concurrency: 4
 
-# Relevance score threshold. abstracts that receive a score less than this from the large language model
-# will have their papers filtered out.
-#
-# Must be within 1-10
-threshold: 7
+window:
+  timezone: "UTC"
+  # last-complete-week | current-week
+  default: "last-complete-week"
 
-# Editorial worker. The implementation imports pi agent from this project's
-# local node_modules. Provider credentials are read from environment variables.
+output:
+  directory: "digests"
+  # One Markdown file per week and per classification category.
+  filename: "weekly-{week}-{category}.md"
+
 pi_agent:
-  provider: "anthropic"
-  model: "configured-model-id"
+  # Editorial worker. The implementation imports the pi agent from this
+  # project's local node_modules. Classification uses a fixed, versioned
+  # prompt with the controlled TOPICS.yaml vocabulary only.
+  provider: "paratera"
+  model: "GLM-5.3-Flash"
   timeout_ms: 120000
   max_retries: 2
-  instructions: |
-    Keep the report concise enough to scan in ten minutes. Never fabricate
-    experimental numbers; state when an abstract does not provide metrics.
-
-# A natural language statement that the large language model will use to judge which papers are relevant 
-#
-# For example:
-#     "I am interested in complexity theory papers that establish upper bounds"
-#     "gas chromatography, mass spectrometry"
-#     "making lots of money"
-#
-# This can be empty, which just return a full list of papers with no judgement or filtering,
-# in whatever order arXiv responds with.
-interest: |
-  Focus ONLY on core architectural innovations and foundational theoretical understanding of Large Language Models.
-
-  ### IN-SCOPE (High Interest):
-  1. Novel Model Architectures & Components:
-     - Core layers & sequence modeling: Transformer variants, Attention mechanisms, State Space Models (Mamba, S4, etc.), Recurrent/Linear Attention (Gated DeltaNet, RWKV, RetNet, KDA), Sparse Attention, Mixture of Experts (MoE), and Hybrid/Hyper-Connection/Residual architectures.
-     - Micro-architectural mechanics: Positional embeddings (RoPE, ALiBi), Normalization layers, Activation functions, KV-cache efficiency (MLA, GQA), Tokenization-free / Byte-level architectures.
-  2. Physics & Theory of LLMs:
-     - Scaling laws, training dynamics, loss landscapes, optimization stability, grokking, and phase transitions.
-     - Mechanistic interpretability, internal representation mechanics, capacity limits, and memory/generalization theory.
-
-  ### OUT-OF-SCOPE (Strict Reject):
-  - Only interested in architectures about language models, not vision, audio, or multimodal models.
-  - Agents & Frameworks: Multi-agent systems, harness frameworks, tool-use, workflow orchestrators, GUI agents, prompt engineering techniques.
-  - Downstream Applications: Domain-specific models (medical, legal, finance), information extraction, summarization, translation, code generation apps, RAG pipelines, or standard benchmarking.
-  - Pure Fine-Tuning/Alignment/Post-train: Standard SFT, RLHF, DPO, or dataset curation UNLESS it introduces a novel model architecture or uncovers new training physics.

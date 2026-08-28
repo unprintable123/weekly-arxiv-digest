@@ -21,8 +21,10 @@ precedence:
   - rag > llm-knowledge
   - reasoning-rl > llm-reasoning
   - ir-evaluation > llm-evaluation
-  - multimodal-generation > diffusion-lm for image/video papers
-  - llm-physics > llm-training for scaling and training-dynamics theory
+  # multimodal-generation wins over diffusion-lm for image/video papers
+  - multimodal-generation > diffusion-lm
+  # llm-physics wins over llm-training for scaling and training-dynamics theory
+  - llm-physics > llm-training
 
 groups:
   - id: llm-core

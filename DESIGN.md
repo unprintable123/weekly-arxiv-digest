@@ -33,7 +33,7 @@
 
 ```yaml
 source:
-  provider: papers.cool       # papers.cool | arxiv
+  provider: papers.cool # papers.cool | arxiv
   base_url: https://papers.cool
   arxiv_base_url: https://export.arxiv.org
   categories: [cs.LG, cs.CL, cs.AI]
@@ -144,7 +144,8 @@ pnpm lint
 pnpm test
 pnpm digest --help
 pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force] [--dry-run]
-pnpm digest preview --week 2026-W34 [--config config.yaml]
+pnpm digest preview --week 2026-W34 [--category TOPIC_ID] [--config config.yaml]
+pnpm digest retry --run <run-id> --stage fetch|classify [--config config.yaml]
 pnpm digest cache stats
 pnpm digest cache prune [--older-than DAYS]
 ```

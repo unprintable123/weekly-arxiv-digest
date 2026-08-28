@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ArxivCrawler, PapersCoolCrawler } from '../src/crawler.js';
+import { Logger } from '../src/log.js';
 import { fixture, makeStore, routeContains, stubFetch, week } from './helpers.js';
 
 const listHtml = fixture('papers-cool-list.html');
@@ -16,6 +17,35 @@ const baseOptions = {
 };
 
 describe('PapersCoolCrawler', () => {
+    it('emits structured debug events without logging response bodies or abstracts', async () => {
+        const { store, cleanup } = makeStore();
+        let output = '';
+        const logger = new Logger({
+            debug: true,
+            stream: { write: (chunk: string) => { output += chunk; return true; } } as NodeJS.WritableStream,
+        });
+        const crawler = new PapersCoolCrawler(store, { ...baseOptions, logger });
+        stubFetch([
+            routeContains('/arxiv/cs.LG', listHtml),
+            routeContains('/arxiv/2401.01234', detailHtml),
+            routeContains('/arxiv/2401.01235', detailHtml),
+        ]);
+
+        await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
+        await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
+
+        const events = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(events.some((entry) => entry.event === 'crawl_category_start')).toBe(true);
+        expect(events.some((entry) => entry.event === 'crawl_list_page')).toBe(true);
+        expect(events.some((entry) => entry.event === 'crawl_detail_success')).toBe(true);
+        expect(events.some((entry) => entry.event === 'crawl_http_cache_hit')).toBe(true);
+        expect(events.some((entry) => entry.event === 'crawl_category_end')).toBe(true);
+        expect(output).not.toContain('enriched abstract');
+        expect(output).not.toContain(listHtml);
+
+        cleanup();
+    });
+
     it('parses list items and merges detail page metadata', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, baseOptions);

@@ -1,68 +1,74 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadConfig, parseInterest } from '../src/config.js';
+import { loadConfig } from '../src/config.js';
+import { makeConfigDir } from './helpers.js';
 
 const baseYaml = `
-threshold: 7
-interest: ""
 source:
   provider: papers.cool
   base_url: https://papers.cool
 `;
 
-function load(yaml: string): Promise<Awaited<ReturnType<typeof loadConfig>>> {
-    const dir = mkdtempSync(join(tmpdir(), 'weekly-digest-config-'));
-    const file = join(dir, 'config.yaml');
-    writeFileSync(file, yaml);
-    return loadConfig(file).finally(() => rmSync(dir, { recursive: true, force: true }));
+async function load(yaml: string, options: { withTopics?: boolean } = {}) {
+    const { file, dir, cleanup } = makeConfigDir(yaml);
+    if (options.withTopics === false) {
+        // Simulate a missing TOPICS.yaml by removing the copy.
+        const { rmSync } = await import('node:fs');
+        rmSync(`${dir}/TOPICS.yaml`);
+    }
+    return loadConfig(file).finally(cleanup);
 }
 
 describe('loadConfig', () => {
-    it('rejects an invalid timezone', async () => {
-        await expect(load(`${baseYaml}\nwindow:\n  timezone: Not/AZone\n`)).rejects.toThrow(/timezone/i);
+    it('applies defaults and loads the sibling TOPICS.yaml taxonomy', async () => {
+        const cfg = await load(`${baseYaml}\ncategories: [cs.LG]\n`);
+        expect(cfg.resolvedCategories).toEqual(['cs.LG']);
+        expect(cfg.output.filename).toBe('weekly-{week}-{category}.md');
+        expect(cfg.output.directory).toBe('digests');
+        expect(cfg.pi_agent.max_retries).toBe(2);
+        expect(cfg.window.timezone).toBe('UTC');
+        expect(cfg.topics.topics.other).toBeDefined();
+        expect(Object.keys(cfg.topics.topics).length).toBeGreaterThan(0);
+        expect(cfg).not.toHaveProperty('threshold');
+        expect(cfg).not.toHaveProperty('interest');
     });
 
-    it('rejects an unknown window default', async () => {
+    it('rejects legacy fields via strict parsing', async () => {
+        await expect(load(`${baseYaml}\nthreshold: 7\n`)).rejects.toThrow(/threshold/);
+        await expect(load(`${baseYaml}\ninterest: llm papers\n`)).rejects.toThrow(/interest/);
+        await expect(load(`${baseYaml}\noutput:\n  language: zh-CN\n`)).rejects.toThrow(/language/);
+        await expect(load(`${baseYaml}\npi_agent:\n  instructions: do X\n`)).rejects.toThrow(/instructions/);
+        await expect(load(`${baseYaml}\ntopic: Computer Science\n`)).rejects.toThrow(/topic/);
+    });
+
+    it('rejects an invalid timezone or unknown window default', async () => {
+        await expect(load(`${baseYaml}\nwindow:\n  timezone: Not/AZone\n`)).rejects.toThrow(/timezone/i);
         await expect(load(`${baseYaml}\nwindow:\n  default: yesterday\n`)).rejects.toThrow();
     });
 
-    it('maps natural-language categories to arXiv ids', async () => {
-        const cfg = await load(`${baseYaml}\ncategories: ["Machine Learning", "Computation and Language"]\n`);
-        expect(cfg.resolvedCategories).toEqual(['cs.LG', 'cs.CL']);
+    it('maps natural-language categories to arXiv ids and accepts raw ids', async () => {
+        const mapped = await load(`${baseYaml}\ncategories: ["Machine Learning", "Computation and Language"]\n`);
+        expect(mapped.resolvedCategories).toEqual(['cs.LG', 'cs.CL']);
+
+        const raw = await load(`${baseYaml}\ncategories: ["cs.LG", "cs.CL"]\n`);
+        expect(raw.resolvedCategories).toEqual(['cs.LG', 'cs.CL']);
+
+        const sourceLevel = await load('source:\n  categories: [cs.AI]\n');
+        expect(sourceLevel.resolvedCategories).toEqual(['cs.AI']);
     });
 
-    it('accepts raw arXiv ids directly', async () => {
-        const cfg = await load(`${baseYaml}\ncategories: ["cs.LG", "cs.CL"]\n`);
-        expect(cfg.resolvedCategories).toEqual(['cs.LG', 'cs.CL']);
-    });
-
-    it('rejects an empty category list', async () => {
+    it('rejects an empty or missing category list', async () => {
         await expect(load(`${baseYaml}\ncategories: []\n`)).rejects.toThrow(/category/i);
+        await expect(load('source:\n  provider: papers.cool\n')).rejects.toThrow(/category/i);
     });
 
-    it('rejects an out-of-range threshold', async () => {
-        await expect(load(baseYaml.replace('threshold: 7', 'threshold: 11'))).rejects.toThrow();
-    });
-});
-
-describe('parseInterest', () => {
-    it('parses numbered entries into stable ids', () => {
-        const cats = parseInterest('1. Novel Model Architectures & Components\n2. Physics & Theory of LLMs');
-        expect(cats).toEqual([
-            { id: 'interest-1-novel-model-architectures-components', name: 'Novel Model Architectures & Components', order: 1 },
-            { id: 'interest-2-physics-theory-of-llms', name: 'Physics & Theory of LLMs', order: 2 },
-        ]);
+    it('fails before anything else when TOPICS.yaml is missing or invalid', async () => {
+        await expect(load(baseYaml, { withTopics: false })).rejects.toThrow(/topic taxonomy/i);
+        await expect(load(`${baseYaml}\ncategories: [cs.LG]\n`)).resolves.toBeTruthy();
     });
 
-    it('falls back to a general category when numbering cannot be parsed', () => {
-        expect(parseInterest('some freeform interest')).toEqual([
-            { id: 'interest-general', name: 'General relevance', order: 1 },
-        ]);
-    });
-
-    it('returns an empty list for empty interest', () => {
-        expect(parseInterest('')).toEqual([]);
+    it('requires {week} and {category} in the output filename', async () => {
+        const cats = 'categories: [cs.LG]\n';
+        await expect(load(`${baseYaml}${cats}output:\n  filename: weekly-{week}.md\n`)).rejects.toThrow(/\{category\}/);
+        await expect(load(`${baseYaml}${cats}output:\n  filename: digest.md\n`)).rejects.toThrow(/filename/);
     });
 });

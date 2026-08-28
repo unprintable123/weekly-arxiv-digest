@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import initSqlJs from 'sql.js';
-import type { Paper, RelevanceResult } from './types.js';
+import type { ClassificationResult, Paper } from './types.js';
 
 const require = createRequire(import.meta.url);
 const sqlJs: any = await initSqlJs({
@@ -153,34 +153,6 @@ CREATE TABLE IF NOT EXISTS fetch_cache (
   error TEXT,
   fetched_at TEXT
 );
-CREATE TABLE IF NOT EXISTS relevance_cache (
-  cache_key TEXT PRIMARY KEY,
-  arxiv_id TEXT,
-  abstract_hash TEXT,
-  interest_hash TEXT,
-  prompt_version TEXT,
-  agent_package_version TEXT,
-  provider TEXT,
-  model TEXT,
-  score INTEGER,
-  reason TEXT,
-  categories_json TEXT,
-  tags_json TEXT,
-  raw TEXT,
-  status TEXT,
-  created_at TEXT
-);
-CREATE TABLE IF NOT EXISTS translation_cache (
-  cache_key TEXT PRIMARY KEY,
-  arxiv_id TEXT,
-  abstract_hash TEXT,
-  target_language TEXT,
-  prompt_version TEXT,
-  translation TEXT,
-  raw TEXT,
-  status TEXT,
-  created_at TEXT
-);
 CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY,
   week TEXT,
@@ -198,9 +170,25 @@ CREATE TABLE IF NOT EXISTS run_papers (
   included INTEGER,
   reason TEXT,
   sort_order INTEGER,
+  classification_key TEXT,
   PRIMARY KEY(run_id, arxiv_id)
 );
-CREATE TABLE IF NOT EXISTS llm_errors (
+CREATE TABLE IF NOT EXISTS classification_cache (
+  cache_key TEXT PRIMARY KEY,
+  arxiv_id TEXT,
+  content_hash TEXT,
+  taxonomy_hash TEXT,
+  prompt_version TEXT,
+  agent_version TEXT,
+  provider TEXT,
+  model TEXT,
+  categories_json TEXT,
+  tags_json TEXT,
+  raw TEXT,
+  status TEXT,
+  created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS agent_errors (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT,
   stage TEXT,
@@ -221,12 +209,14 @@ CREATE TABLE IF NOT EXISTS crawl_errors (
   created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS run_documents (
-  run_id TEXT PRIMARY KEY,
+  run_id TEXT,
+  category_id TEXT,
   week TEXT,
   document_json TEXT,
   markdown TEXT,
   file TEXT,
-  created_at TEXT
+  created_at TEXT,
+  PRIMARY KEY(run_id, category_id)
 );
 `;
 
@@ -240,6 +230,43 @@ export class Store {
     this.db = new SqliteStore(database, file);
     this.db.pragma('journal_mode = WAL');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * Forward-compatible migrations for databases created by older versions.
+   * Legacy tables (relevance_cache, translation_cache, llm_errors) are kept
+   * untouched but no longer read or written.
+   */
+  private migrate(): void {
+    const table = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='run_documents'")
+      .get() as any;
+    if (table && !String(table.sql ?? '').includes('category_id')) {
+      // Legacy single-document shape: migrate to (run_id, category_id) primary key.
+      this.db.exec('ALTER TABLE run_documents RENAME TO run_documents_legacy');
+      this.db.exec(`CREATE TABLE run_documents (
+        run_id TEXT,
+        category_id TEXT,
+        week TEXT,
+        document_json TEXT,
+        markdown TEXT,
+        file TEXT,
+        created_at TEXT,
+        PRIMARY KEY(run_id, category_id)
+      )`);
+      this.db.exec(`INSERT INTO run_documents (run_id, category_id, week, document_json, markdown, file, created_at)
+        SELECT run_id, '', week, document_json, markdown, file, created_at FROM run_documents_legacy`);
+      this.db.exec('DROP TABLE run_documents_legacy');
+    }
+    this.ensureColumn('run_papers', 'classification_key', 'classification_key TEXT');
+  }
+
+  private ensureColumn(table: string, column: string, ddl: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+    if (columns.length && !columns.some((entry) => entry.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    }
   }
 
   close(): void {
@@ -308,14 +335,12 @@ export class Store {
       );
   }
 
-  getRelevance(key: string): RelevanceResult | undefined {
+  getClassification(key: string): ClassificationResult | undefined {
     const row = this.db
-      .prepare('SELECT * FROM relevance_cache WHERE cache_key=? AND status="ok"')
+      .prepare('SELECT * FROM classification_cache WHERE cache_key=? AND status="ok"')
       .get(key) as any;
     return (
       row && {
-        score: row.score,
-        reason: row.reason,
         categories: JSON.parse(row.categories_json),
         tags: JSON.parse(row.tags_json),
         raw: row.raw,
@@ -323,16 +348,14 @@ export class Store {
     );
   }
 
-  latestRelevance(id: string): RelevanceResult | undefined {
+  latestClassification(id: string): ClassificationResult | undefined {
     const row = this.db
       .prepare(
-        'SELECT * FROM relevance_cache WHERE arxiv_id=? AND status="ok" ORDER BY created_at DESC LIMIT 1',
+        'SELECT * FROM classification_cache WHERE arxiv_id=? AND status="ok" ORDER BY created_at DESC LIMIT 1',
       )
       .get(id) as any;
     return (
       row && {
-        score: row.score,
-        reason: row.reason,
         categories: JSON.parse(row.categories_json),
         tags: JSON.parse(row.tags_json),
         raw: row.raw,
@@ -340,20 +363,29 @@ export class Store {
     );
   }
 
-  saveRelevance(key: string, p: Paper, interestHash: string, meta: any, r: RelevanceResult): void {
+  saveClassification(
+    key: string,
+    p: Paper,
+    meta: {
+      taxonomyHash: string;
+      promptVersion: string;
+      agentVersion: string;
+      provider: string;
+      model: string;
+    },
+    r: ClassificationResult,
+  ): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO relevance_cache VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
       .run(
         key,
         p.arxivId,
         p.contentHash,
-        interestHash,
+        meta.taxonomyHash,
         meta.promptVersion,
         meta.agentVersion,
         meta.provider,
         meta.model,
-        r.score,
-        r.reason,
         JSON.stringify(r.categories),
         JSON.stringify(r.tags),
         r.raw || '',
@@ -362,33 +394,11 @@ export class Store {
       );
   }
 
-  getTranslation(key: string): string | undefined {
-    const row = this.db
-      .prepare('SELECT translation FROM translation_cache WHERE cache_key=? AND status="ok"')
-      .get(key) as any;
-    return row?.translation;
-  }
-
-  latestTranslation(id: string): string | undefined {
-    const row = this.db
-      .prepare(
-        'SELECT translation FROM translation_cache WHERE arxiv_id=? AND status="ok" ORDER BY created_at DESC LIMIT 1',
-      )
-      .get(id) as any;
-    return row?.translation;
-  }
-
-  saveTranslation(key: string, p: Paper, lang: string, translation: string, raw = ''): void {
-    this.db
-      .prepare('INSERT OR REPLACE INTO translation_cache VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(key, p.arxivId, p.contentHash, lang, 'v1', translation, raw, 'ok', new Date().toISOString());
-  }
-
-  addLlmError(runId: string, stage: string, arxivId: string, error: unknown, retries: number): void {
+  addAgentError(runId: string, stage: string, arxivId: string, error: unknown, retries: number): void {
     const message = error instanceof Error ? error.message : String(error);
     this.db
       .prepare(
-        'INSERT INTO llm_errors (run_id, stage, arxiv_id, error_type, retries, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO agent_errors (run_id, stage, arxiv_id, error_type, retries, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
       .run(
         runId,
@@ -413,10 +423,17 @@ export class Store {
       .run(endedAt, status, JSON.stringify(stats), id);
   }
 
-  addRunPaper(runId: string, id: string, included: boolean, reason: string, order: number): void {
+  addRunPaper(
+    runId: string,
+    id: string,
+    included: boolean,
+    reason: string,
+    order: number,
+    classificationKey = '',
+  ): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO run_papers VALUES (?,?,?,?,?)')
-      .run(runId, id, included ? 1 : 0, reason, order);
+      .prepare('INSERT OR REPLACE INTO run_papers VALUES (?,?,?,?,?,?)')
+      .run(runId, id, included ? 1 : 0, reason, order, classificationKey);
   }
 
   listRunPapers(runId: string): any[] {
@@ -438,8 +455,7 @@ export class Store {
       .prepare(
         'SELECT (SELECT count(*) FROM papers) papers, ' +
         '(SELECT count(*) FROM fetch_cache) fetches, ' +
-        '(SELECT count(*) FROM relevance_cache) relevance, ' +
-        '(SELECT count(*) FROM translation_cache) translations',
+        '(SELECT count(*) FROM classification_cache) classifications',
       )
       .get();
   }
@@ -452,8 +468,7 @@ export class Store {
     const transaction = this.db.transaction(() => {
       let deleted = 0;
       deleted += this.db.prepare('DELETE FROM fetch_cache WHERE fetched_at < ?').run(before).changes;
-      deleted += this.db.prepare('DELETE FROM relevance_cache WHERE created_at < ?').run(before).changes;
-      deleted += this.db.prepare('DELETE FROM translation_cache WHERE created_at < ?').run(before).changes;
+      deleted += this.db.prepare('DELETE FROM classification_cache WHERE created_at < ?').run(before).changes;
       return deleted;
     });
     return transaction();
@@ -494,10 +509,10 @@ export class Store {
       .get(week, configHash) as any;
   }
 
-  llmErrorsForRun(runId: string, stage?: string): any[] {
+  agentErrorsForRun(runId: string, stage?: string): any[] {
     const sql = stage
-      ? 'SELECT * FROM llm_errors WHERE run_id=? AND stage=? ORDER BY id'
-      : 'SELECT * FROM llm_errors WHERE run_id=? ORDER BY id';
+      ? 'SELECT * FROM agent_errors WHERE run_id=? AND stage=? ORDER BY id'
+      : 'SELECT * FROM agent_errors WHERE run_id=? ORDER BY id';
     return this.db.prepare(sql).all(runId, stage) as any[];
   }
 
@@ -509,13 +524,29 @@ export class Store {
       .all(runId) as any[];
   }
 
-  saveRunDocument(runId: string, week: string, document: unknown, markdown: string, file: string): void {
+  /** Snapshot one category document for a run. */
+  saveRunDocument(
+    runId: string,
+    week: string,
+    categoryId: string,
+    document: unknown,
+    markdown: string,
+    file: string,
+  ): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO run_documents VALUES (?,?,?,?,?,?)')
-      .run(runId, week, JSON.stringify(document), markdown, file, new Date().toISOString());
+      .prepare('INSERT OR REPLACE INTO run_documents VALUES (?,?,?,?,?,?,?)')
+      .run(runId, categoryId, week, JSON.stringify(document), markdown, file, new Date().toISOString());
   }
 
-  getRunDocument(runId: string): any {
-    return this.db.prepare('SELECT * FROM run_documents WHERE run_id=?').get(runId) as any;
+  getRunDocument(runId: string, categoryId: string): any {
+    return this.db
+      .prepare('SELECT * FROM run_documents WHERE run_id=? AND category_id=?')
+      .get(runId, categoryId) as any;
+  }
+
+  getRunDocuments(runId: string): any[] {
+    return this.db
+      .prepare('SELECT * FROM run_documents WHERE run_id=? ORDER BY category_id')
+      .all(runId) as any[];
   }
 }
