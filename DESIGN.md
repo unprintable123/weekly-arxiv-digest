@@ -2,174 +2,159 @@
 
 ## 1. 目标与范围
 
-本项目是一个 Node.js + TypeScript 的命令行自动化 agent：从 papers.cool 抓取 arXiv 论文，按周建立候选集，调用 pi agent 判断论文是否符合用户兴趣，最后生成可复现的 Markdown digest。
+本项目是一个 Node.js + TypeScript 命令行 agent：按周从 papers.cool（可选 arXiv API）收集论文，使用本地 pi agent 按 `TOPICS.yaml` 的受控词表分类，最后为每个分类生成 Markdown digest。
 
-首版默认覆盖 `cs.LG`、`cs.CL`、`cs.AI`，类别、周起止日期、相关性阈值和兴趣描述均由 YAML 配置控制。配置文件中已有的 `topic`、`categories`、`threshold`、`pi_agent` 和 `interest` 是输入约定；其中 `interest` 中每个编号的 IN-SCOPE 条目是一个输出 `category`，而不是把所有论文仅归为一个“大类”。所有 CLI 命令由项目的 pnpm scripts 暴露，pi agent 及其相关库作为项目依赖安装在本地 `node_modules` 中。
+首版默认关注 `cs.LG`、`cs.CL`、`cs.AI`，来源类别和周窗口均由 YAML 配置控制。论文元数据和英文摘要始终来自抓取源；LLM 只负责分类和可选 tag，不负责相关性评分，也不负责摘要翻译。
 
-### 必须实现
+必须输出的论文字段：标题、分类、作者、英文原始摘要、arXiv/papers.cool 链接。`tag` 是可选的分类细分结果，由 agent 从摘要中提取；没有 tag 时不输出该字段。
 
-- 抓取 papers.cool 的分类列表和论文详情；保留 arXiv id、标题、作者、分类、发布日期、摘要、详情页和来源 URL，但不下载或解析 PDF。
-- 以 ISO 周为单位处理数据。默认窗口为最近一个完整周，也允许通过 CLI 明确传入 `--from`/`--to`。
-- 先做确定性去重和本地缓存，再对新候选调用 pi agent。
-- 只输出评分大于等于 `threshold` 的论文；空 `interest` 时跳过判断并保留全部候选。
-- 对保留论文输出英文原文摘要和中文翻译；输出 `category`（兴趣清单中的一个或多个分类）和可选的 agent 生成 `tag`。
-- 重复运行同一周时结果稳定、不会重复调用已缓存的抓取、摘要、评分或翻译任务。
+非目标：下载或解析 PDF、使用正文筛选论文、LLM 打分/阈值过滤、LLM 翻译摘要、引用图谱、账号订阅服务、Web UI 和 HTML/CSS 展示。HTML 是 Markdown 版本稳定后再考虑的独立工作。
 
-### 非目标
+## 2. 技术栈与模块边界
 
-- 不下载或解析论文 PDF，也不使用正文做筛选；这不是首版延后项，而是本工具的明确数据边界。
-- 不在首版实现引用图谱、用户账号/订阅服务、Web UI 或 HTML 输出。
-- 不把 LLM 当作事实来源：论文元数据和英文摘要始终来自抓取源；LLM 只负责相关性判断、分类/tag 和翻译。
+- Node.js `>=22.19.0`、pnpm `9.15.0`、严格 TypeScript、ESM、`tsx` 和 `tsc`。
+- `yaml` + `zod` 负责配置和 agent JSON 校验，`cheerio` 负责 HTML/Atom 解析，`p-limit` 控制并发，`sql.js` 提供单文件 SQLite 缓存。
+- `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 和 `@earendil-works/pi-coding-agent` 从本地依赖加载。禁止全局 `pi`、`npx`、运行时下载依赖或子进程启动 agent。
 
-## 2. 推荐技术栈与依赖管理
+源码职责：
 
-- Node.js 20+、pnpm、TypeScript、`tsx`（开发运行）和 `tsc`（构建）。`package.json` 使用 `packageManager` 固定 pnpm 版本，并提交 `pnpm-lock.yaml`。
-- `yaml` 解析配置，`zod` 校验配置和 LLM JSON，`cheerio` 解析 papers.cool HTML，`p-limit` 控制并发，`date-fns`/原生 UTC 日期函数计算 ISO 周。
-- SQLite（使用无需本机编译的 `sql.js` WASM 实现）作为单文件缓存和运行记录；不依赖外部服务。
-- Markdown 使用模板渲染（例如 `handlebars` 或小型纯函数），避免把未经转义的标题当成 Markdown 标记。
-- pi agent
-
-应用不调用全局 `pi` 可执行文件，不使用 `npx` 临时下载，也不通过子进程启动 agent。`PiAgentAdapter` 直接使用本地 pi agent TypeScript API 创建会话、发送提示词并读取结果；具体包版本由 lockfile 固定。适配器要求 agent 返回单个 JSON，并用 zod 校验，不能凭自由文本猜测字段。模型服务所需的密钥从环境变量读取，不进入 YAML、源码或日志。
+- `src/config.ts`：读取 YAML、校验字段和解析来源类别配置。
+- `src/window.ts`：计算 ISO 周窗口，默认最近一个完整周，也支持显式 `--from`/`--to`。
+- `src/crawler.ts`：抓取分类列表和详情页，解析元数据与摘要，处理分页、版本去重、限速、重试和 HTTP 缓存。
+- `src/pi.ts`：创建本地 pi 会话，仅执行分类/tag 请求，并校验受控 JSON 返回值。
+- `src/db.ts`：持久化论文、抓取响应、分类结果、运行记录和错误记录。
+- `src/pipeline.ts`：编排收集、分类、排序和输出，保证缓存命中时不重复调用网络或 agent。
+- `src/renderer.ts`：只消费领域对象并渲染 Markdown，不访问网络、数据库或 agent。
+- `src/cli.ts`：暴露 `run`、`preview` 和缓存管理命令，stdout 保持机器可读。
 
 ## 3. 配置设计
 
-现有 `config.yaml` 可以继续使用。建议逐步扩展为：
+推荐配置：
 
 ```yaml
 source:
-  base_url: 'https://papers.cool'
-  categories: ['cs.LG', 'cs.CL', 'cs.AI']
+  provider: papers.cool       # papers.cool | arxiv
+  base_url: https://papers.cool
+  arxiv_base_url: https://export.arxiv.org
+  categories: [cs.LG, cs.CL, cs.AI]
   request_delay_ms: 400
   timeout_ms: 20000
-  user_agent: 'weekly-digest/0.1'
+  user_agent: weekly-digest/0.1
+  concurrency: 4
 window:
-  timezone: 'UTC'
-  default: 'last-complete-week'
+  timezone: UTC
+  default: last-complete-week
 output:
-  directory: 'digests'
-  filename: 'weekly-{week}.md'
-  language: 'zh-CN'
+  directory: digests
+  filename: weekly-{week}-{category}.md
 pi_agent:
-  provider: 'anthropic'
-  model: 'configured-model-id'
+  provider: anthropic
+  model: configured-model-id
   timeout_ms: 120000
   max_retries: 2
 ```
 
-为兼容当前文件：若不存在 `source.categories`，读取顶层 `categories`；自然语言类别（如 `Artificial Intelligence`）可通过内置映射转换到 arXiv ID，也允许直接填写 ID。配置错误（阈值不在 1--10、日期无效、类别为空等）在抓取前直接失败。
+为兼容当前配置，若不存在 `source.categories`，读取顶层 `categories`；自然语言类别可映射为 arXiv ID，也允许直接填写 ID。`pi_agent` 只配置模型连接和重试参数，不提供个人兴趣或自定义 instructions。分类 prompt 必须由代码中的固定模板生成，并通过版本号参与缓存 key。不要再增加 `threshold`、`interest`、`instructions` 或 `output.language` 之类无关字段。配置错误（类别为空、URL 无效、日期无效等）必须在抓取前失败。
 
-`interest` 的编号条目应被解析为稳定的分类 ID，例如 `interest-1-novel-model-architectures`。如果无法可靠解析编号，则保留一条 `interest-general`，并在输出中使用 agent 返回的受控分类名；不能让 LLM 任意创建新的顶层分类。
+`TOPICS.yaml` 是分类候选词表和机器可读 schema。模型应优先使用已有 topic 和其中的常见 tag；无法归入现有 topic 时返回 `other`，新增 topic 只能由人工审核后追加。运行时使用 YAML + Zod 校验该文件并计算稳定 hash，分类缓存和固定 prompt 都必须绑定该 hash。运行结果中的 category 必须是 topic 的稳定 ID 或受控的 `other`，不能让 agent 随意创建顶层类别。
 
-## 4. 系统流程
+## 4. 三阶段流程
 
 ```text
-配置加载/校验
+加载并校验配置
       |
-计算周窗口（UTC，含起始日、不含结束日）
+计算半开周窗口 [from, to)
       |
-按 source.categories 抓取列表 -> 规范化 -> arXiv ID 去重
+按配置类别抓取列表 -> 规范化 -> arXiv ID 去重
       |
-抓取详情/摘要（HTTP 缓存、限速、重试）
+抓取详情和摘要（缓存、限速、重试；必要时 arXiv fallback）
       |
-缓存命中则复用，否则 pi agent 评分 + category/tag
+分类缓存命中则复用，否则 pi agent 返回 category + 可选 tag
       |
-保留 score >= threshold 的论文
+按 category、发布日期、arXiv ID 稳定排序
       |
-翻译摘要（独立缓存）
-      |
-按分类、评分、发布日期、arXiv ID 稳定排序
-      |
-渲染 digests/weekly-{ISO-week}.md，并写运行清单
+每周每个 category 写一个 Markdown 文件，并记录运行结果
 ```
 
-列表页是发现入口，详情页是元数据的优先来源。若 papers.cool 页面缺少摘要，可按 arXiv ID 请求 arXiv 摘要页作为补充，并在记录中标注 fallback；若两者都失败，该论文进入错误表而不阻塞其他论文。
+### 4.1 收集论文
 
-抓取器必须处理分页、相对链接、HTML 实体、时区和撤稿/版本号。规范化标题和摘要只用于去重/缓存指纹，展示内容保留原文；同一 arXiv ID 的多个版本默认保留最新版本。
+列表页用于发现，详情页用于补全标题、作者、分类、发布时间和摘要。papers.cool 缺少摘要时可以按 arXiv ID 请求摘要页作为 fallback；两者都失败时记录抓取错误并跳过该论文，不阻塞其他类别。
 
-## 5. LLM 合同
+抓取器必须处理分页、相对链接、HTML 实体、时区、撤稿和版本号。同一 arXiv ID 的多个版本只保留最新版本。展示字段保留原文；规范化标题/摘要只用于去重和缓存指纹。任何请求都不得指向 PDF URL。
 
-评分提示词中的论文内容严格只包含标题和英文摘要，此外仅附带完整 `interest`、评分规则和 `pi_agent.instructions`。作者、arXiv 分类、PDF、正文及其他论文元数据不作为判断输入，避免无关信息影响相关性评分。提示词明确要求只依据标题和摘要，不编造摘要未提供的实验结果；无法判断时给出低分并说明原因。
+### 4.2 分类与 tag
 
-要求 pi 返回：
+分类 prompt 使用代码内固定、版本化的模板，只包含论文标题、英文摘要和 `TOPICS.yaml` 中的候选 topic。作者、PDF、正文和用户自定义 instructions 不得进入分类判断。pi agent 仅作为内部自动化执行器，调用方不能注入临时任务说明。
+
+agent 必须返回一个 JSON 对象：
 
 ```json
 {
-  "score": 1,
-  "reason": "short evidence-based reason",
-  "categories": ["interest-1-novel-model-architectures"],
-  "tags": ["state-space-model"],
-  "translation_zh": "中文翻译"
+  "categories": ["llm-architecture"],
+  "tags": ["state-space-model", "efficient-attention"]
 }
 ```
 
-评分调用和翻译调用逻辑上分离：评分缓存不会因为翻译失败而失效，翻译也可以在不重新评分的情况下重试。`categories` 只能来自解析后的 interest 分类 ID；`tags` 最多 3 个、短横线格式，非法值被丢弃。若 agent 返回无效 JSON、模型 API 报错或超时，则按可配置次数重试；最终失败的论文记入 `llm_errors`，默认不进入 digest，并让本次 pnpm command 返回非零退出码。
+`categories` 至少一个且只能来自受控 topic ID；`tags` 可为空，最多 3 个，使用小写短横线格式。无效 JSON、未知分类、超时或服务错误按配置次数重试，最终失败写入错误表。没有评分，因此所有成功抓取且分类成功的论文都进入输出，不做 threshold 过滤。
 
-## 6. 缓存与数据模型
+分类缓存 key 至少包含 arXiv ID、标题/摘要 hash、topic 词表 hash、固定 prompt 版本、agent 包版本、provider 和 model。任一输入变化都必须使旧分类缓存失效。
 
-SQLite 文件默认放在 `.cache/weekly-digest.sqlite`，数据库目录和 digest 输出目录均可配置。建议表：
+## 5. 缓存与数据模型
 
-- `papers`: `arxiv_id` 主键、版本、标题、作者 JSON、categories JSON、abstract_en、published_at、updated_at、source_url、content_hash、抓取时间。
-- `fetch_cache`: URL、请求参数指纹、HTTP 状态、响应体 hash、etag/last-modified、过期时间、错误信息。成功响应可长期复用，失败响应使用短 TTL。
-- `relevance_cache`: `arxiv_id`、`abstract_hash`、`interest_hash`、`prompt_version`、`agent_package_version`、`provider`、`model`、score、reason、categories/tags JSON、原始响应、状态和时间。以上字段组成唯一缓存键，兴趣、提示词、agent 版本或模型变化会自然失效。
-- `translation_cache`: `arxiv_id`、`abstract_hash`、目标语言、`prompt_version`、译文、原始响应、状态和时间。
-- `runs`: `run_id`、周窗口、配置 hash、开始/结束时间、状态、统计信息 JSON。
-- `run_papers`: 运行与论文的关联、最终纳入与否、过滤原因、排序序号。
-- `llm_errors`: 阶段、论文、错误分类、重试次数、最后错误，便于后续只重试失败项。
+SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，成功的抓取和分类响应可复用，失败响应使用短 TTL。建议表：
 
-所有 JSON 字段使用稳定序列化；写入采用事务，单篇失败不回滚已成功的论文。缓存命中必须记录命中来源，便于审计和调试。可提供 `cache prune --older-than`，但默认不自动删除数据。
+- `papers`：arXiv ID、版本、标题、作者 JSON、原始 arXiv 分类、英文摘要、发布时间、详情 URL、来源 URL、内容 hash、抓取时间。
+- `fetch_cache`：URL、请求指纹、HTTP 状态、响应体 hash、ETag/Last-Modified、过期时间和错误。
+- `classification_cache`：论文内容 hash、topic/prompt/agent 元信息、category JSON、tag JSON、原始响应、状态和时间。
+- `runs`：run ID、周窗口、配置 hash、开始/结束时间、状态和统计信息。
+- `run_papers`：运行与论文的关联、分类结果、是否输出、排序序号和过滤/错误原因。
+- `crawl_errors` / `agent_errors`：阶段、论文、URL（如有）、错误类型、重试次数和消息。
+- `run_documents`：每个 category 文件的文档快照和输出路径，供 `preview` 稳定重现。
 
-## 7. 输出与渲染层
+写入使用事务；运行期间的成功记录不能因单篇失败回滚。数据库和 Markdown 文件都采用临时文件加原子 rename。默认不自动清理缓存，可显式执行 `cache prune`。
 
-抓取、筛选和翻译阶段输出与展示格式无关的 `DigestDocument` 领域对象；渲染器只接收该对象，不直接查询数据库或调用 agent。首版实现 `MarkdownRenderer`，通过统一接口（如 `Renderer.render(document): string`）生成 Markdown。文件命名、扩展名和 MIME type 由渲染器声明，而不是散落在流水线中。
+## 6. Markdown 输出
 
-这种边界为未来增加 `HtmlRenderer` 留出余裕：HTML 输出可复用同一份排序后数据、分类、tag 和中英文摘要，无需重新抓取、评分或翻译。后续 HTML renderer 可增加语义化结构、目录、类别筛选、响应式样式和 print CSS；所有外部文本必须 HTML escape，禁止直接注入 agent 输出。HTML 是未来改进项，不属于首版验收范围。
-
-### Markdown 输出
-
-文件头包含周窗口、生成时间、配置 hash、候选数/纳入数和类别统计。每篇论文包含：
+每周每个 category 生成 `weekly-{week}-{category}.md`。文件头包含周窗口、生成时间、配置 hash、候选数量和该分类数量；每篇论文包含：
 
 ```markdown
 ## Paper title
 
-- **Category:** Novel Model Architectures & Components
+- **Category:** Model Architecture
 - **Tag:** `state-space-model`, `efficient-attention`
-- **Score:** 9/10
+- **Authors:** Alice Example, Bob Sample
 - **arXiv:** [2401.01234](https://arxiv.org/abs/2401.01234)
+- **Source:** [papers.cool](https://papers.cool/arxiv/2401.01234)
 - **Published:** 2026-08-20
 
-### Abstract (English)
+### Abstract
 
-原始英文摘要
-
-### 摘要（中文）
-
-缓存的中文翻译
+Original English abstract.
 ```
 
-没有 tag 时省略该行；category 至少一个，多个时按 interest 顺序输出。标题、tag、摘要中的 Markdown 特殊字符须转义，链接使用白名单协议。输出采用临时文件写入后原子 rename，避免中断留下半文件。渲染器 contract test 应确保同一 `DigestDocument` 可由不同 renderer 消费，且不会触发网络、数据库或 LLM 调用。
+没有 tag 时省略 `Tag` 行。标题、作者、tag 和摘要中的 Markdown 特殊字符必须转义；链接只允许 `https://arxiv.org/` 和 `https://papers.cool/`。分类内按发布日期倒序、arXiv ID 正序稳定排序。渲染器不得自行查询数据库或调用 agent。
 
-## 8. CLI 与可观测性
+## 7. CLI 与验证
 
-`package.json` 提供 `"digest": "tsx src/cli.ts"`。所有用户命令从项目根目录通过 pnpm 执行，不要求全局安装 CLI：
+```text
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm build
+pnpm lint
+pnpm test
+pnpm digest --help
+pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force] [--dry-run]
+pnpm digest preview --week 2026-W34 [--config config.yaml]
+pnpm digest cache stats
+pnpm digest cache prune [--older-than DAYS]
+```
 
-- `pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force]`
-- `pnpm digest preview --week 2026-W34`（只渲染，不调用网络/LLM）
-- `pnpm digest cache stats|prune`
-- `pnpm digest retry --run <run-id> --stage fetch|score|translate`
+分类失败应返回非零退出码并保留已成功结果。日志使用 JSON lines，至少包含 run、stage、arxiv_id、category、cache_hit、耗时和错误类型；普通日志不打印摘要全文、完整 prompt 或密钥。
 
-安装使用 `pnpm install --frozen-lockfile`，构建、类型检查和测试也分别通过 `pnpm build`、`pnpm typecheck`、`pnpm test` 执行。定时任务必须先切换到项目目录，再调用同一 pnpm script，确保解析到项目本地 `node_modules`。
+## 8. 可靠性与验收标准
 
-日志使用 JSON lines 或带时间戳的结构化文本，包含 run、arxiv_id、stage、cache_hit、耗时和错误分类；摘要正文和完整 prompt 默认不打印到普通日志，可在 debug 模式写入受保护的 trace 文件。
-
-## 9. 可靠性、合规与安全
-
-- 遵守 papers.cool 和 arXiv 的 robots、服务条款和合理速率；使用固定 User-Agent、请求间隔、指数退避和最大并发。
-- 仅保存公开论文元数据和用户本地 LLM 响应；不把密钥写入配置或日志。
-- 运行时只加载 lockfile 固定的本地 Node.js 依赖；禁止 fallback 到全局 pi 命令或运行时下载包。
-- HTML 解析使用 DOM 解析器，不用正则解析页面结构；所有外部文本在 Markdown 输出前转义。
-- 抓取器不得请求 PDF URL；agent 适配器不得读取本地或远程 PDF，评分 prompt 的论文输入字段只能是 `title` 和 `abstract_en`。
-- 网络源变化时通过解析器契约测试和选择器版本记录快速定位；必要时停止运行并保留部分结果，而不是静默生成空 digest。
-
-## 10. 验收标准
-
-给定固定的 fixture HTML、固定周窗口和 mock pi 输出：重复运行产生字节一致的 Markdown，第二次运行不增加网络/LLM 调用；分类过滤、版本去重、阈值边界、失败重试和中英文摘要均有自动化测试。真实环境运行一次 `digest run` 能生成目标周文件，并在日志中报告抓取、缓存和过滤统计。
+- 遵守 papers.cool/arXiv robots、服务条款和合理速率；固定 User-Agent、请求间隔、超时、指数退避和最大并发。
+- 不下载 PDF，不把密钥写入配置、源码、日志或 Markdown；只使用 lockfile 固定的本地依赖。
+- 解析器使用 DOM/XML 解析器而非正则。网络源变化时通过 fixture 契约测试发现，不静默生成空 digest。
+- 固定 fixture、周窗口和 agent 分类结果时，重复运行输出字节一致；第二次运行不增加网络或 agent 调用。
+- 自动化测试覆盖分页、版本去重、摘要 fallback、分类 JSON 校验、topic/tag 约束、缓存命中/失效、失败重试、Markdown 转义和多 category 文件输出。

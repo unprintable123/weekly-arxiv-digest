@@ -1,0 +1,216 @@
+version: 1
+kind: topic-taxonomy
+
+rules:
+  id_pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+  tag_pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+  max_categories: 2
+  max_tags: 3
+  primary_required: true
+  unknown_topic: other
+  classification_input:
+    - title
+    - abstract_en
+    - topic_catalog
+  classification_output:
+    categories: topic ids, ordered primary then optional secondary
+    tags: lowercase kebab-case strings
+
+precedence:
+  - multimodal-agent > agent-design
+  - rag > llm-knowledge
+  - reasoning-rl > llm-reasoning
+  - ir-evaluation > llm-evaluation
+  - multimodal-generation > diffusion-lm for image/video papers
+  - llm-physics > llm-training for scaling and training-dynamics theory
+
+groups:
+  - id: llm-core
+    name: 大模型核心与学习
+    topics:
+      - id: llm-architecture
+        name: 大模型架构
+        description: Transformer 变体、注意力、MoE、状态空间、残差和归一化等结构创新；不包含单纯训练技巧。
+        tags: [transformer, attention, state-space-model, mixture-of-experts, recurrent-model, positional-encoding]
+      - id: llm-training
+        name: 大模型训练与微调
+        description: 预训练目标、SFT、参数高效微调、优化策略和训练配方；理论规律优先使用 llm-physics。
+        tags: [pretraining, sft, parameter-efficient-finetuning, lora, continual-learning, optimizer]
+      - id: llm-physics
+        name: LLM 物理与理论
+        description: 研究模型规模、训练过程和能力涌现等可解释规律的理论或经验工作。
+        tags: [scaling-laws, training-dynamics, loss-landscape, optimization-stability, grokking, phase-transition]
+      - id: llm-efficiency
+        name: 模型效率与压缩
+        description: 减少显存、计算、延迟或能耗的量化、剪枝、蒸馏、稀疏化和推理优化。
+        tags: [quantization, pruning, distillation, sparsity, inference-acceleration, memory-efficiency]
+      - id: llm-knowledge
+        name: 知识与记忆
+        description: 模型内部知识、知识编辑、外部记忆、长上下文和持续记忆；检索流程使用 rag。
+        tags: [knowledge-editing, knowledge-injection, long-context, external-memory, continual-knowledge, catastrophic-forgetting]
+      - id: llm-reasoning
+        name: 大模型推理
+        description: 纯推理能力、链式思维、数学/逻辑推理、测试时搜索和规划；RL 训练使用 reasoning-rl。
+        tags: [chain-of-thought, test-time-compute, mathematical-reasoning, logical-reasoning, planning, self-consistency]
+      - id: reasoning-rl
+        name: 推理强化学习
+        description: 以强化学习训练数学、代码或通用推理能力为主要贡献。
+        tags: [grpo, ppo, reinforcement-learning, process-reward, outcome-reward, verifiable-reward]
+      - id: llm-interpret
+        name: 可解释性与机理
+        description: Mechanistic interpretability、内部表征、电路、神经元/特征归因和行为机制。
+        tags: [mechanistic-interpretability, representation-analysis, activation-patching, circuit-analysis, feature-attribution, sparse-autoencoder]
+      - id: llm-alignment
+        name: 模型对齐
+        description: 通过偏好数据、奖励模型或强化学习使模型遵循人类目标、价值和行为规范；安全攻击研究使用 llm-safety。
+        tags: [rlhf, rlhf-variant, dpo, preference-optimization, reward-model, value-alignment]
+      - id: llm-safety
+        name: 模型安全
+        description: Jailbreak、red teaming、提示注入、越狱防御、有害内容和安全评测；不包含一般价值对齐训练。
+        tags: [jailbreak, red-teaming, prompt-injection, refusal, harmful-content, safety-evaluation]
+      - id: llm-evaluation
+        name: 大模型评测方法
+        description: LLM 能力、可靠性、事实性和评测方法论；新数据集或基准发布使用 benchmark。
+        tags: [llm-evaluation, human-evaluation, automatic-evaluation, factuality, calibration, evaluation-protocol]
+      - id: llm-uncertainty
+        name: 不确定性与校准
+        description: 不确定性量化、置信度、校准、幻觉概率和选择性预测。
+        tags: [uncertainty-quantification, confidence-estimation, calibration, hallucination, selective-prediction, conformal-prediction]
+
+  - id: agents
+    name: Agent 与程序交互
+    topics:
+      - id: agent-design
+        name: Agent 架构与规划
+        description: Agent 状态机、规划、记忆、工作流编排和多 agent 协作；具体工具调用使用 tool-use。
+        tags: [agent-architecture, planning, memory, multi-agent, workflow, task-decomposition]
+      - id: tool-use
+        name: 工具使用与 API 调用
+        description: Function calling、工具学习、API 调用、浏览器/代码执行和工具选择。
+        tags: [function-calling, tool-learning, api-calling, tool-selection, web-browsing, code-execution]
+      - id: agent-rl
+        name: Agent 强化学习
+        description: Agent 与环境交互的在线 RL、轨迹优化、策略学习和 tool-use RL。
+        tags: [agentic-rl, online-learning, environment-interaction, trajectory-optimization, tool-use-rl, reward-design]
+      - id: agent-safety
+        name: Agent 安全与权限
+        description: Agent 权限、沙箱、可控性、风险治理和安全执行；模型 jailbreak 使用 llm-safety。
+        tags: [agent-safety, sandboxing, permission-control, prompt-injection, policy-enforcement, safe-execution]
+      - id: skill-learning
+        name: Skill 学习与组合
+        description: Agent 技能发现、技能获取、技能合成、技能库和跨任务复用。
+        tags: [skill-learning, skill-composition, skill-library, procedural-memory, policy-reuse, continual-skill]
+      - id: code-gen
+        name: 代码生成与程序合成
+        description: 代码生成、补全、程序修复、软件工程 agent 和形式化程序合成。
+        tags: [code-generation, code-completion, program-synthesis, program-repair, software-engineering, repository-level]
+
+  - id: nlp
+    name: NLP 基础任务
+    topics:
+      - id: nlg
+        name: 文本生成
+        description: 非对话的文本生成、可控生成、风格迁移和开放式生成。
+        tags: [text-generation, controlled-generation, style-transfer, open-ended-generation, constrained-decoding, decoding]
+      - id: nlu
+        name: 自然语言理解
+        description: 语义表示、分类、推断、意图识别和语言理解分析。
+        tags: [text-classification, semantic-parsing, natural-language-inference, intent-detection, sentence-embedding, semantic-understanding]
+      - id: ner-re
+        name: 信息抽取
+        description: 命名实体识别、关系/事件抽取、槽位填充和结构化信息抽取。
+        tags: [named-entity-recognition, relation-extraction, event-extraction, slot-filling, information-extraction, structured-prediction]
+      - id: dialogue
+        name: 对话系统
+        description: 任务型/开放域对话、对话状态跟踪、对话管理和响应生成。
+        tags: [task-oriented-dialogue, open-domain-dialogue, dialogue-state-tracking, dialogue-management, response-generation, conversation]
+      - id: mt
+        name: 机器翻译
+        description: 翻译模型、低资源/多语言翻译、质量估计和翻译解码。
+        tags: [machine-translation, neural-machine-translation, low-resource-translation, multilingual-translation, translation-quality, document-translation]
+      - id: multilingual
+        name: 多语言与跨语言
+        description: 跨语言迁移、多语言表示、低资源语言和语言公平性；具体翻译系统使用 mt。
+        tags: [multilingual, cross-lingual, low-resource-language, language-transfer, cross-lingual-representation, language-coverage]
+
+  - id: retrieval
+    name: 检索与结构化知识
+    topics:
+      - id: retrieval-model
+        name: 检索模型与排序
+        description: 稠密/稀疏检索、向量表示、重排序、查询理解和检索系统。
+        tags: [dense-retrieval, sparse-retrieval, reranking, embedding, query-expansion, retrieval-index]
+      - id: rag
+        name: 检索增强生成
+        description: 检索、上下文构建和生成联合设计；没有检索流程的知识记忆使用 llm-knowledge。
+        tags: [retrieval-augmented-generation, hybrid-search, context-retrieval, query-rewriting, grounded-generation, citation-generation]
+      - id: ir-evaluation
+        name: 信息检索评测
+        description: 检索/排序系统的相关性标注、指标、评测集和实验协议。
+        tags: [information-retrieval, relevance-judgment, ndcg, mrr, recall-at-k, retrieval-benchmark]
+      - id: knowledge-graph
+        name: 知识图谱与结构化知识
+        description: 知识图谱构建、链接预测、图推理和图与语言模型结合。
+        tags: [knowledge-graph, entity-linking, relation-prediction, graph-reasoning, graph-neural-network, ontology]
+
+  - id: multimodal
+    name: 多模态、视觉与语音
+    topics:
+      - id: vlm
+        name: 视觉语言模型
+        description: 图像/视频与文本联合理解、视觉问答和视觉语言表示。
+        tags: [vision-language-model, visual-question-answering, image-text-retrieval, visual-grounding, multimodal-understanding, video-language]
+      - id: multimodal-generation
+        name: 多模态生成
+        description: 文生图、文生视频、图像/视频编辑和跨模态内容生成。
+        tags: [text-to-image, text-to-video, image-generation, video-generation, image-editing, diffusion-model]
+      - id: multimodal-reasoning
+        name: 多模态推理
+        description: 视觉/视频/音频输入上的推理、数学推理和多模态 Chain-of-Thought。
+        tags: [multimodal-reasoning, visual-reasoning, video-reasoning, audio-reasoning, multimodal-chain-of-thought, grounded-reasoning]
+      - id: multimodal-agent
+        name: 多模态 Agent
+        description: 以视觉、语音或具身环境为输入的 agent、GUI agent 和多模态工具使用。
+        tags: [multimodal-agent, gui-agent, embodied-agent, visual-navigation, screen-understanding, multimodal-tool-use]
+      - id: audio-speech
+        name: 语音与音频
+        description: ASR、TTS、语音对话、音频理解和声学建模。
+        tags: [automatic-speech-recognition, text-to-speech, speech-synthesis, speech-enhancement, audio-understanding, spoken-dialogue]
+      - id: diffusion-lm
+        name: 扩散语言模型
+        description: 扩散过程用于文本/离散序列生成、训练或解码；图像/视频扩散使用 multimodal-generation。
+        tags: [diffusion-language-model, discrete-diffusion, denoising, diffusion-decoding, non-autoregressive-generation, score-based-model]
+
+  - id: data-and-applications
+    name: 数据、基准与应用
+    topics:
+      - id: data-quality
+        name: 数据质量与构建
+        description: 数据筛选、去重、合成、增强、污染检测、数据配比和数据治理。
+        tags: [data-curation, data-filtering, deduplication, synthetic-data, data-contamination, data-mixture]
+      - id: benchmark
+        name: 基准与数据集
+        description: 新数据集、任务基准、评测套件和跨模型比较资源。
+        tags: [dataset, benchmark, evaluation-suite, data-collection, annotation, leaderboard]
+      - id: prompt-engineering
+        name: 提示工程
+        description: Prompt 模板、上下文学习、提示优化和提示安全；模型架构/训练创新不归此类。
+        tags: [prompt-engineering, in-context-learning, few-shot, prompt-optimization, chain-of-thought-prompting, demonstration-selection]
+      - id: personalization
+        name: 个性化
+        description: 用户画像、偏好建模、个性化生成和用户条件控制。
+        tags: [personalization, user-preference, user-modeling, preference-learning, personalized-generation, adaptive-model]
+      - id: llm-app
+        name: LLM 应用
+        description: 教育、医疗、法律、金融、科学发现等领域应用；通用方法归入相应核心 topic。
+        tags: [domain-application, healthcare, education, legal-nlp, finance, scientific-discovery]
+      - id: other
+        name: 其他
+        description: 摘要信息不足或无法归入上述 topic 的论文；使用后记录 taxonomy gap 供人工审核。
+        tags: [unclassified, cross-domain, taxonomy-gap, new-topic, insufficient-evidence, other]
+
+aliases:
+  - from: multimodal-gen
+    to: multimodal-generation
+  - from: rl-reasoning
+    to: reasoning-rl
