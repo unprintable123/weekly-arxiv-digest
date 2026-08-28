@@ -10,7 +10,6 @@ const paper = (overrides: Partial<ClassifiedPaper> = {}): ClassifiedPaper => ({
     abstractEn: 'We study attention and find it helps.',
     publishedAt: '2024-01-02T00:00:00.000Z',
     detailUrl: 'https://arxiv.org/abs/2401.01234',
-    sourceUrl: 'https://papers.cool/arxiv/2401.01234',
     contentHash: 'hash',
     classification: { categories: ['llm-architecture', 'llm-physics'], tags: [] },
     ...overrides,
@@ -48,7 +47,8 @@ describe('MarkdownRenderer', () => {
         expect(out).toContain('- **Tag:** `attention`, `state-space-model`');
         expect(out).toContain('- **Authors:** Alice Example, Bob Sample');
         expect(out).toContain('- **arXiv:** [2401.01234](https://arxiv.org/abs/2401.01234)');
-        expect(out).toContain('- **Source:** [papers.cool](https://papers.cool/arxiv/2401.01234)');
+        expect(out).toContain('- **papers.cool:** [2401.01234](https://papers.cool/arxiv/2401.01234)');
+        expect(out).not.toContain('**Source:**');
         expect(out).toContain('- **Published:** 2024-01-02');
         expect(out).toContain('### Abstract');
         expect(out).toContain('We study attention and find it helps\\.');
@@ -98,7 +98,6 @@ describe('MarkdownRenderer', () => {
             document([
                 paper({
                     detailUrl: 'https://export.arxiv.org/abs/2401.01234',
-                    sourceUrl: 'https://export.arxiv.org/abs/2401.01234',
                 }),
             ]),
         );

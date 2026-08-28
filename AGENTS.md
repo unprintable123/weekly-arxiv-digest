@@ -17,7 +17,7 @@ The pipeline is deliberately layered:
 1. `src/config.ts` validates YAML and resolves source category aliases. `src/window.ts` computes explicit or configured ISO-week windows.
 2. `src/crawler.ts` discovers and normalizes papers, handles pagination, versions, retries, rate limits, bounded detail requests, and HTTP response caching. It must never request PDFs.
 3. `src/llm.ts` owns the OpenAI-compatible chat completion client and fixed-template category/tag JSON validation. Prompts may use only the title, English abstract, and the controlled topic vocabulary.
-4. `src/db.ts` persists papers, fetches, classification results, runs, run-paper associations, crawl/agent errors, and run document snapshots.
+4. `src/db.ts` persists papers, fetches, and classification results in a cache-only store (no run/error-history tables; writes stay in memory and are flushed every 100 new classifications and at stage boundaries).
 5. `src/pipeline.ts` coordinates stages and cache keys, while `src/renderer.ts` renders a `DigestDocument` without doing I/O or calling an agent.
 6. `src/cli.ts` exposes `run`, `preview`, and `cache` commands and keeps stdout machine-readable.
 
@@ -44,7 +44,7 @@ The assistant must:
 
 - inspect the relevant source, tests, configuration, and documentation before editing;
 - keep paper metadata and English abstracts sourced from the configured provider;
-- preserve deterministic ordering, stable hashes, cache invalidation metadata, and run snapshots;
+- preserve deterministic ordering, stable hashes, and cache invalidation metadata;
 - record recoverable fetch and classification-agent failures instead of silently producing an empty successful digest;
 - keep secrets in environment variables and out of YAML, source, logs, fixtures, and generated Markdown;
 - add or update focused tests for behavior changes, preferably using the existing fixtures and mocked `fetch`/`LlmInvoker` helpers.
@@ -85,6 +85,7 @@ pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--fo
 pnpm digest preview --week YYYY-Www [--config config.yaml]
 pnpm digest cache stats
 pnpm digest cache prune [--older-than DAYS]
+pnpm digest cache clear-classifications [--older-than DAYS]
 ```
 
 `pnpm test` runs `test/**/*.test.ts` with Vitest in the Node environment. Tests should remain deterministic and must not depend on live papers.cool, arXiv, or model services.

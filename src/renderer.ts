@@ -42,10 +42,9 @@ export class MarkdownRenderer implements Renderer {
             // arXiv IDs are validated structured identifiers, safe unescaped.
             const arxivUrl = safeLink(paper.detailUrl);
             out += `- **arXiv:** [${paper.arxivId}](${arxivUrl ?? '#'})\n`;
-            const sourceUrl = safeLink(paper.sourceUrl);
-            out += sourceUrl
-                ? `- **Source:** [${sourceUrl.startsWith('https://papers.cool/') ? 'papers.cool' : 'arXiv'}](${sourceUrl})\n`
-                : '- **Source:** [#](#)\n';
+            // papers.cool mirrors every arXiv id on a predictable path; the id
+            // is validated and the URL never comes from untrusted fields.
+            out += `- **papers.cool:** [${paper.arxivId}](https://papers.cool/arxiv/${paper.arxivId})\n`;
             out += `- **Published:** ${paper.publishedAt.slice(0, 10)}\n\n### Abstract\n\n${md(paper.abstractEn)}\n\n`;
         }
         return out;

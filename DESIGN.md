@@ -22,7 +22,7 @@
 - `src/window.ts`：计算 ISO 周窗口，默认最近一个完整周，也支持显式 `--from`/`--to`。
 - `src/crawler.ts`：抓取分类列表和详情页，解析元数据与摘要，处理分页、版本去重、限速、重试和 HTTP 缓存。
 - `src/llm.ts`：通过 chat completion API 执行分类/tag 请求，并校验受控 JSON 返回值。
-- `src/db.ts`：持久化论文、抓取响应、分类结果、运行记录和错误记录。
+- `src/db.ts`：持久化论文、抓取响应和分类结果；写入在内存累积，按固定节奏刷盘。
 - `src/pipeline.ts`：编排收集、分类、排序和输出，保证缓存命中时不重复调用网络或 agent。
 - `src/renderer.ts`：只消费领域对象并渲染 Markdown，不访问网络、数据库或 agent。
 - `src/cli.ts`：暴露 `run`、`preview` 和缓存管理命令，stdout 保持机器可读。
@@ -46,6 +46,7 @@ window:
   default: last-complete-week
 output:
   directory: digests
+  subdirectory: '{week}' # 每周文件放入 "YYYY-Www" 子目录；置空则单层存放
   filename: weekly-{week}-{category}.md
 llm:
   # OpenAI-compatible chat completion endpoint; BASE_URL/API_KEY come from
@@ -75,7 +76,7 @@ llm:
       |
 按 category、发布日期、arXiv ID 稳定排序
       |
-每周每个 category 写一个 Markdown 文件，并记录运行结果
+每周每个 category 写一个 Markdown 文件
 ```
 
 ### 4.1 收集论文
@@ -103,21 +104,20 @@ agent 必须返回一个 JSON 对象：
 
 ## 5. 缓存与数据模型
 
-SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，成功的抓取和分类响应可复用，失败响应使用短 TTL。建议表：
+SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，它只是一个可复用的缓存库，不是运行历史数据库：没有 runs、run_papers、run_documents 这类运行跟踪表，也没有错误日志表。查找一篇论文的唯一途径是 `papers` 表加上 `classification_cache`（按缓存 key 命中）。保留四张表：
 
-- `papers`：arXiv ID、版本、标题、作者 JSON、原始 arXiv 分类、英文摘要、发布时间、详情 URL、来源 URL、内容 hash、抓取时间。
-- `fetch_cache`：URL、请求指纹、HTTP 状态、响应体 hash、ETag/Last-Modified、过期时间和错误。
-- `classification_cache`：论文内容 hash、topic/prompt/client 元信息、category JSON、tag JSON、原始响应、状态和时间。
-- `runs`：run ID、周窗口、配置 hash、开始/结束时间、状态和统计信息。
-- `run_papers`：运行与论文的关联、分类结果、是否输出、排序序号和过滤/错误原因。
-- `crawl_errors` / `agent_errors`：阶段、论文、URL（如有）、错误类型、重试次数和消息。
-- `run_documents`：每个 category 文件的文档快照和输出路径，供 `preview` 稳定重现。
+- `papers`：arXiv ID（主键）、版本、标题、作者 JSON、原始 arXiv 分类、英文摘要、发布时间、更新时间、详情 URL、内容 hash、抓取时间。不再保存 `source_url`；papers.cool 链接由 arXiv ID 按固定模板构造。
+- `fetch_cache`：URL（主键）、HTTP 状态、响应体、响应体 hash、ETag/Last-Modified、过期时间和抓取时间。只缓存 200 响应；失败请求从不落盘，下次运行自然重试。没有 error 列。
+- `classification_cache`：缓存 key（主键）、arXiv ID、内容 hash、prompt 版本、client 版本、endpoint、model、category JSON、tag JSON、原始响应、状态和时间。没有独立的 `taxonomy_hash` 列：taxonomy hash 只参与缓存 key 的计算，因此 taxonomy/prompt/model/endpoint 任一变化自然产生新 key，旧条目自动失效。
+- `meta`：极小的 key/value 表，目前仅保存 `(week, config hash) -> generated_at`，用于让全缓存重复运行的输出字节一致。
 
-写入使用事务；运行期间的成功记录不能因单篇失败回滚。数据库和 Markdown 文件都采用临时文件加原子 rename。默认不自动清理缓存，可显式执行 `cache prune`。
+写入 IO：sql.js 数据库完全驻留内存，写语句不触发磁盘 IO。刷盘（导出内存快照到临时文件再原子 rename）按以下节奏执行：抓取阶段结束一次；分类阶段每积累 100 条新增分类结果一次，阶段结束时再补齐不足 100 条的尾部；meta 更新后；`close()`。纯缓存命中的读取路径不产生任何写入和刷盘。进程崩溃最多丢失最近未刷盘的新增缓存，且由于快照是原子替换，磁盘上的旧库文件永远不会损坏。不做旧版本数据库自动迁移：库文件结构仅由当前代码的 SCHEMA 决定，删除旧库文件即重新开始缓存。`cache prune` 在一个事务中完成删除。默认不自动清理缓存。
+
+分类缓存可通过 `digest cache clear-classifications [--older-than DAYS]` 显式清除：不带参数删除全部分类缓存，带参数只删除早于 N 天的条目，返回删除行数。
 
 ## 6. Markdown 输出
 
-每周每个 category 生成 `weekly-{week}-{category}.md`。文件头包含周窗口、生成时间、配置 hash、候选数量和该分类数量；每篇论文包含：
+每周每个 category 生成 `weekly-{week}-{category}.md`，存放在 `output.directory` 下以 `{week}`（如 `2026-W34`）命名的子目录中（`output.subdirectory` 控制，默认 `{week}`，置空则单层存放）。文件头包含周窗口、生成时间、配置 hash、候选数量和该分类数量；每篇论文包含：
 
 ```markdown
 ## Paper title
@@ -126,7 +126,7 @@ SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，成功的抓取和分�
 - **Tag:** `state-space-model`, `efficient-attention`
 - **Authors:** Alice Example, Bob Sample
 - **arXiv:** [2401.01234](https://arxiv.org/abs/2401.01234)
-- **Source:** [papers.cool](https://papers.cool/arxiv/2401.01234)
+- **papers.cool:** [2401.01234](https://papers.cool/arxiv/2401.01234)
 - **Published:** 2026-08-20
 
 ### Abstract
@@ -134,7 +134,7 @@ SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，成功的抓取和分�
 Original English abstract.
 ```
 
-没有 tag 时省略 `Tag` 行。标题、作者、tag 和摘要中的 Markdown 特殊字符必须转义；链接只允许 `https://arxiv.org/` 和 `https://papers.cool/`。分类内按发布日期倒序、arXiv ID 正序稳定排序。渲染器不得自行查询数据库或调用 agent。
+没有 tag 时省略 `Tag` 行。没有单独的 `Source` 行：每篇论文固定输出 arXiv 与 papers.cool 两条链接，papers.cool 链接由 arXiv ID 按固定模板 `https://papers.cool/arxiv/<id>` 构造，不来自任何外部字段。标题、作者、tag 和摘要中的 Markdown 特殊字符必须转义；arXiv 链接仍只允许 `https://arxiv.org/`（含 export 镜像归一化），papers.cool 链接是代码内构造的白名单地址。分类内按发布日期倒序、arXiv ID 正序稳定排序。渲染器不得自行查询数据库或调用 agent。
 
 ## 7. CLI 与验证
 
@@ -147,16 +147,19 @@ pnpm test
 pnpm digest --help
 pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force] [--dry-run]
 pnpm digest preview --week 2026-W34 [--category TOPIC_ID] [--config config.yaml]
-pnpm digest retry --run <run-id> --stage fetch|classify [--config config.yaml]
 pnpm digest cache stats
 pnpm digest cache prune [--older-than DAYS]
+pnpm digest cache clear-classifications [--older-than DAYS]
 ```
 
-分类失败应返回非零退出码并保留已成功结果。日志使用 JSON lines，至少包含 run、stage、arxiv_id、category、cache_hit、耗时和错误类型；普通日志不打印摘要全文、完整 prompt 或密钥。
+`run` 的 stdout 输出 `files`、`categories` 和 `stats`（无 run ID，因为不再记录运行行）。抓取或分类失败通过 JSON lines 日志报告并返回非零退出码；失败不会被写库，直接重新 `run` 即可重试（失败的论文没有缓存条目，会自动重新分类），`--force` 用于强制重新抓取和重新分类。
+
+`preview` 不读取任何快照：它按 ISO 周（`YYYY-Www`）反推周窗口，从 `papers` 表取出该周的论文并按当前 config 的缓存 key 查 `classification_cache`，然后离线重建每个 category 的 Markdown 视图。若本周没有缓存的论文或分类结果，preview 报错提示先运行 `digest run`。因为没有存档快照，preview 的 `Generated` 时间是当前时间，其余内容与对应 run 的输出一致。
 
 ## 8. 可靠性与验收标准
 
 - 遵守 papers.cool/arXiv robots、服务条款和合理速率；固定 User-Agent、请求间隔、超时、指数退避和最大并发。
+- 错误只通过 JSON lines 日志报告（stage、arxiv_id、error 类型等），不写入数据库；普通日志不打印摘要全文、完整 prompt 或密钥。分类失败返回非零退出码并保留已成功结果。
 - 不下载 PDF，不把密钥写入配置、源码、日志或 Markdown；只使用 lockfile 固定的本地依赖。
 - 解析器使用 DOM/XML 解析器而非正则。网络源变化时通过 fixture 契约测试发现，不静默生成空 digest。
 - 固定 fixture、周窗口和 agent 分类结果时，重复运行输出字节一致；第二次运行不增加网络或 agent 调用。

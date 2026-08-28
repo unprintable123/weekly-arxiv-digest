@@ -251,7 +251,7 @@ class HttpClient {
       elapsed_ms: Date.now() - requestStarted,
       error: errorMessage(lastError),
     });
-    this.store.saveFetch(url, { status: 0, body: '', bodyHash: '', error: String(lastError) });
+    // Failures are never cached; the next run retries the request.
     throw lastError;
   }
 }
@@ -312,7 +312,7 @@ export class PapersCoolCrawler implements PaperCrawler {
         items: items.length,
       });
       for (const element of items.toArray()) {
-        const paper = this.parseListItem($, element, url.toString());
+        const paper = this.parseListItem($, element);
         if (!paper || !withinWindow(paper.publishedAt, from, to)) continue;
         found.set(paper.arxivId, chooseLatest(found.get(paper.arxivId), paper));
       }
@@ -395,7 +395,7 @@ export class PapersCoolCrawler implements PaperCrawler {
     };
   }
 
-  private parseListItem($: cheerio.CheerioAPI, element: any, sourceUrl: string): Paper | undefined {
+  private parseListItem($: cheerio.CheerioAPI, element: any): Paper | undefined {
     const node = $(element);
     const rawId = node.attr('id') ?? '';
     const link = node
@@ -432,7 +432,6 @@ export class PapersCoolCrawler implements PaperCrawler {
       abstractEn,
       publishedAt: published.toISOString(),
       detailUrl: `https://arxiv.org/abs/${identity.id}${identity.version ?? ''}`,
-      sourceUrl,
     });
   }
 
@@ -530,7 +529,7 @@ export class ArxivCrawler implements PaperCrawler {
       });
       if (entries.length === 0) break;
       for (const element of entries.toArray()) {
-        const paper = this.parseEntry($, element, url.toString());
+        const paper = this.parseEntry($, element);
         if (!paper || !withinWindow(paper.publishedAt, from, to)) continue;
         found.set(paper.arxivId, chooseLatest(found.get(paper.arxivId), paper));
       }
@@ -568,7 +567,7 @@ export class ArxivCrawler implements PaperCrawler {
     };
   }
 
-  private parseEntry($: cheerio.CheerioAPI, element: any, sourceUrl: string): Paper | undefined {
+  private parseEntry($: cheerio.CheerioAPI, element: any): Paper | undefined {
     const node = $(element);
     const identity = idFromHref(trimText(node.find('id').first().text()));
     if (!identity) return undefined;
@@ -597,7 +596,6 @@ export class ArxivCrawler implements PaperCrawler {
       publishedAt: published.toISOString(),
       updatedAt: updated?.toISOString(),
       detailUrl: `https://arxiv.org/abs/${identity.id}${identity.version ?? ''}`,
-      sourceUrl,
     });
   }
 }
@@ -632,7 +630,6 @@ function mergePaper(base: Paper, patch: Partial<Paper>): Paper {
     abstractEn: patch.abstractEn || base.abstractEn,
     publishedAt: patch.publishedAt || base.publishedAt,
     detailUrl: patch.detailUrl || base.detailUrl,
-    sourceUrl: base.sourceUrl,
   });
 }
 

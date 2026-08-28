@@ -1,10 +1,9 @@
 import { mkdir, rename, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import pLimit from 'p-limit';
 import type { Config } from './config.js';
 import { createCrawler, type PaperCrawler } from './crawler.js';
-import { rowToPaper, Store } from './db.js';
+import { Store } from './db.js';
 import { Logger, elapsed } from './log.js';
 import {
     classifyPapers,
@@ -34,7 +33,6 @@ export interface RunOptions {
 }
 
 export interface RunResult {
-    runId: string;
     /** written digest files, one per category (empty in dry-run mode) */
     files: string[];
     /** one document per non-empty category, ordered by category id */
@@ -80,28 +78,58 @@ function sortPapers(papers: ClassifiedPaper[]): ClassifiedPaper[] {
     );
 }
 
+/**
+ * Byte-stable regenerations: the generation timestamp is keyed by week and
+ * config hash, so a fully cached repeat run reproduces the exact previous
+ * files instead of restamping every document with a fresh clock reading.
+ */
+function generationMetaKey(week: string, configHashValue: string): string {
+    return `generated_at:${week}:${configHashValue}`;
+}
+
+/** Group classified papers into one document per non-empty category. */
+function buildDocuments(
+    classified: ClassifiedPaper[],
+    taxonomy: Config['topics'],
+    window: Window,
+    configHashValue: string,
+    generatedAt: string,
+    candidateCount: number,
+): DigestDocument[] {
+    // A paper with primary + secondary categories appears in both files.
+    const byCategory = new Map<string, ClassifiedPaper[]>();
+    for (const paper of classified) {
+        for (const categoryId of paper.classification.categories) {
+            const list = byCategory.get(categoryId) ?? [];
+            list.push(paper);
+            byCategory.set(categoryId, list);
+        }
+    }
+    return [...byCategory.keys()].sort().map((categoryId) => ({
+        week: window.week,
+        from: window.from.toISOString().slice(0, 10),
+        to: window.to.toISOString().slice(0, 10),
+        categoryId,
+        categoryName: taxonomy.topics[categoryId]?.name ?? categoryId,
+        generatedAt,
+        configHash: configHashValue,
+        candidateCount,
+        papers: byCategory.get(categoryId)!,
+    }));
+}
+
 export async function runDigest(
     cfg: Config,
     window: Window,
     opts: RunOptions,
 ): Promise<RunResult> {
     const store = new Store(join(opts.root, '.cache/weekly-digest.sqlite'));
-    const runId = randomUUID();
     const configHashValue = configHash(cfg);
-    const startedAt = new Date().toISOString();
     const startedMs = Date.now();
-    const logger = opts.logger ?? new Logger({ runId });
+    const logger = opts.logger ?? new Logger();
     const invoker = opts.invoker;
     const taxonomy = cfg.topics;
 
-    store.startRun({
-        runId,
-        week: window.week,
-        from: window.from.toISOString(),
-        to: window.to.toISOString(),
-        configHash: configHashValue,
-        startedAt,
-    });
     logger.info('run_start', {
         week: window.week,
         from: window.from.toISOString().slice(0, 10),
@@ -133,7 +161,6 @@ export async function runDigest(
         for (const category of cfg.resolvedCategories) {
             const stageMs = Date.now();
             const result = await crawler.fetchCategory(category, window.from, window.to);
-            for (const error of result.errors) store.addCrawlError(runId, error);
             for (const paper of result.papers) papers.set(paper.arxivId, paper);
             crawlErrorCount += result.errors.length;
             newFetches = newFetches || result.newFetches;
@@ -155,6 +182,11 @@ export async function runDigest(
             }
         }
 
+        // Persist all crawled papers plus the fetch cache once at the stage
+        // boundary; snapshotting per statement was the main IO bottleneck.
+        for (const paper of papers.values()) store.savePaper(paper);
+        store.flush();
+
         // Never let a source outage silently produce a "successful" empty digest.
         if (papers.size === 0 && crawlErrorCount > 0) {
             throw new Error(`Source unavailable: all list fetches failed (${crawlErrorCount} error(s))`);
@@ -165,30 +197,40 @@ export async function runDigest(
         // several papers at once; a failed batch is retried per paper so one
         // bad response does not lose the whole batch.
         const classificationKeys = new Map<string, string>();
-        const limit = pLimit(Math.max(1, cfg.source.concurrency ?? 4));
-        const pending: Paper[] = [];
         for (const paper of papers.values()) {
-            store.savePaper(paper);
             classificationKeys.set(paper.arxivId, classificationCacheKey(paper, cfg, taxonomy.hash));
-            if (!opts.force && store.getClassification(classificationKeys.get(paper.arxivId)!)) {
+        }
+        const pending: Paper[] = [];
+        const results = new Map<string, ClassificationResult>();
+        for (const paper of papers.values()) {
+            const cached = opts.force ? undefined : store.getClassification(classificationKeys.get(paper.arxivId)!);
+            if (cached) {
+                results.set(paper.arxivId, cached);
                 logger.debug('classify', {
                     arxiv_id: paper.arxivId,
-                    category: store.getClassification(classificationKeys.get(paper.arxivId)!)!.categories[0],
+                    category: cached.categories[0],
                     cache_hit: true,
                 });
             } else {
                 pending.push(paper);
             }
         }
-
-        const results = new Map<string, ClassificationResult>();
-        for (const paper of papers.values()) {
-            const cached = opts.force ? undefined : store.getClassification(classificationKeys.get(paper.arxivId)!);
-            if (cached) results.set(paper.arxivId, cached);
-        }
+        const limit = pLimit(Math.max(1, cfg.source.concurrency ?? 4));
 
         const classifyMs = Date.now();
         const batches = chunk(pending, CLASSIFICATION_BATCH_SIZE);
+        // New classification rows are serialized at a fixed cadence instead of
+        // per statement or once per stage: every 100 LLM results trigger one
+        // snapshot so a long run keeps its recent work durable without turning
+        // each insert into a full-file rewrite. Cache-hit reads issue no flush.
+        const FLUSH_INTERVAL = 100;
+        let unsaved = 0;
+        const checkpoint = () => {
+            unsaved += 1;
+            if (unsaved < FLUSH_INTERVAL) return;
+            unsaved = 0;
+            store.flush();
+        };
         // Coarse progress for long runs: one info log roughly every 100 papers
         // (newClassifications is shared, and single-threaded increments cannot
         // skip a boundary).
@@ -215,7 +257,6 @@ export async function runDigest(
                             classificationKeys.get(arxivId)!,
                             paper,
                             {
-                                taxonomyHash: taxonomy.hash,
                                 promptVersion: CLASSIFICATION_PROMPT_VERSION,
                                 agentVersion: LLM_CLIENT_VERSION,
                                 provider: cfg.llm.base_url ?? '',
@@ -223,6 +264,7 @@ export async function runDigest(
                             },
                             classification,
                         );
+                        checkpoint();
                         logger.debug('classify', {
                             arxiv_id: arxivId,
                             category: classification.categories[0],
@@ -254,7 +296,6 @@ export async function runDigest(
                                 classificationKeys.get(paper.arxivId)!,
                                 paper,
                                 {
-                                    taxonomyHash: taxonomy.hash,
                                     promptVersion: CLASSIFICATION_PROMPT_VERSION,
                                     agentVersion: LLM_CLIENT_VERSION,
                                     provider: cfg.llm.base_url ?? '',
@@ -262,6 +303,7 @@ export async function runDigest(
                                 },
                                 classificationResult,
                             );
+                            checkpoint();
                             logger.debug('classify', {
                                 arxiv_id: paper.arxivId,
                                 category: classificationResult.categories[0],
@@ -271,14 +313,6 @@ export async function runDigest(
                             // A single classification failure must not lose the
                             // rest of the run, but the run still reports it.
                             errors += 1;
-                            store.addAgentError(
-                                runId,
-                                'classify',
-                                paper.arxivId,
-                                paperError,
-                                cfg.llm.max_retries,
-                            );
-                            store.addRunPaper(runId, paper.arxivId, false, 'classify-error', 0, classificationKeys.get(paper.arxivId)!);
                             logger.warn('agent_error', {
                                 arxiv_id: paper.arxivId,
                                 stage: 'classify',
@@ -304,100 +338,79 @@ export async function runDigest(
             new_classifications: newClassifications,
             elapsed_ms: elapsed(classifyMs),
         });
+        // Flush the tail below the last 100-paper boundary (no-op for a
+        // cache-hit-only run, which never writes classification rows).
+        if (unsaved > 0) store.flush();
 
         const classified = sortPapers(
             [...papers.values()]
                 .filter((paper) => results.has(paper.arxivId))
                 .map((paper) => ({ ...paper, classification: results.get(paper.arxivId)! })),
         );
-        classified.forEach((paper, index) =>
-            store.addRunPaper(runId, paper.arxivId, true, 'included', index, classificationKeys.get(paper.arxivId)),
-        );
-
-        // A paper with primary + secondary categories appears in both files.
-        const byCategory = new Map<string, ClassifiedPaper[]>();
-        for (const paper of classified) {
-            for (const categoryId of paper.classification.categories) {
-                const list = byCategory.get(categoryId) ?? [];
-                list.push(paper);
-                byCategory.set(categoryId, list);
-            }
-        }
 
         // Byte-identical output on replay: when this run made no new network or
-        // agent work, reuse the previous completed run's generation time so the
-        // digest files are stable across identical repeat runs. generatedAt
-        // always equals the run's ended_at so replays reproduce the exact files.
+        // agent work, reuse the previous generation time stored in the meta
+        // table (keyed by week + config hash) so repeat runs reproduce files.
         const didWork = newFetches || newClassifications > 0;
+        const metaKey = generationMetaKey(window.week, configHashValue);
         let generatedAt: string;
         if (didWork) {
             generatedAt = new Date().toISOString();
+            store.setMeta(metaKey, generatedAt);
+            store.flush();
         } else {
-            const previous = store.latestRunForWeek(window.week, configHashValue);
-            generatedAt = previous?.ended_at ?? new Date().toISOString();
+            generatedAt = store.getMeta(metaKey) ?? new Date().toISOString();
         }
 
-        const renderer = new MarkdownRenderer();
-        const documents: DigestDocument[] = [];
-        const files: string[] = [];
-        for (const categoryId of [...byCategory.keys()].sort()) {
-            documents.push({
-                week: window.week,
-                from: window.from.toISOString().slice(0, 10),
-                to: window.to.toISOString().slice(0, 10),
-                categoryId,
-                categoryName: taxonomy.topics[categoryId]?.name ?? categoryId,
-                generatedAt,
-                configHash: configHashValue,
-                candidateCount: papers.size,
-                papers: byCategory.get(categoryId)!,
-            });
-        }
+        const documents = buildDocuments(
+            classified,
+            taxonomy,
+            window,
+            configHashValue,
+            generatedAt,
+            papers.size,
+        );
+        const status = errors > 0 || crawlErrorCount > 0 ? 'error' : 'ok';
 
         if (!opts.dryRun) {
             const outDir = join(opts.root, cfg.output.directory);
-            await mkdir(outDir, { recursive: true });
+            // Two-level layout: one `{week}` subfolder (e.g. "2026-W34") per week.
+            const weekDir = join(
+                outDir,
+                cfg.output.subdirectory.replace('{week}', window.week),
+            );
+            await mkdir(weekDir, { recursive: true });
+            const renderer = new MarkdownRenderer();
+            const files: string[] = [];
             for (const document of documents) {
                 const markdown = renderer.render(document);
                 const file = join(
-                    outDir,
+                    weekDir,
                     cfg.output.filename
                         .replace('{week}', window.week)
                         .replace('{category}', document.categoryId),
                 );
                 // Atomic write: temp file + rename so readers never see partial output.
-                const temporary = `${file}.tmp-${runId}`;
+                const temporary = `${file}.tmp`;
                 await writeFile(temporary, markdown, 'utf8');
                 await rename(temporary, file);
                 files.push(file);
-                store.saveRunDocument(runId, window.week, document.categoryId, document, markdown, file);
             }
-        } else {
-            for (const document of documents) {
-                store.saveRunDocument(
-                    runId,
-                    window.week,
-                    document.categoryId,
-                    document,
-                    renderer.render(document),
-                    '',
-                );
-            }
+            logger.info('run_end', {
+                status,
+                candidates: papers.size,
+                classified: classified.length,
+                categories: documents.length,
+                errors,
+                crawl_errors: crawlErrorCount,
+                elapsed_ms: elapsed(startedMs),
+            });
+            return { files, documents, errors: errors + crawlErrorCount, status };
         }
 
-        const status = errors > 0 || crawlErrorCount > 0 ? 'error' : 'ok';
-        store.finishRun(runId, status, {
-            candidates: papers.size,
-            classified: classified.length,
-            categories: documents.length,
-            errors,
-            crawl_errors: crawlErrorCount,
-            new_fetches: newFetches,
-            new_classifications: newClassifications,
-            dry_run: !!opts.dryRun,
-        }, generatedAt);
         logger.info('run_end', {
             status,
+            dry_run: true,
             candidates: papers.size,
             classified: classified.length,
             categories: documents.length,
@@ -405,12 +418,8 @@ export async function runDigest(
             crawl_errors: crawlErrorCount,
             elapsed_ms: elapsed(startedMs),
         });
-        return { runId, files, documents, errors: errors + crawlErrorCount, status };
+        return { files: [], documents, errors: errors + crawlErrorCount, status };
     } catch (error) {
-        store.finishRun(runId, 'error', {
-            errors: 1,
-            message: error instanceof Error ? error.message : String(error),
-        });
         logger.error('run_error', {
             error: error instanceof Error ? error.message : String(error),
             elapsed_ms: elapsed(startedMs),
@@ -422,226 +431,87 @@ export async function runDigest(
 }
 
 export interface PreviewResult {
-    runId: string;
     week: string;
     markdown: string;
     documents: DigestDocument[];
 }
 
 /**
- * Reproduce the stored snapshot of a completed run. Output is byte-stable and
- * never rebuilt from "latest" cache entries.
+ * Rebuild the digest views for a week from stored papers plus the
+ * classification cache. No network or agent calls: preview renders the same
+ * documents the next `run` for that week would produce.
  */
 export function previewDigest(
     root: string,
+    cfg: Config,
     week: string,
     categoryId?: string,
 ): PreviewResult {
     const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
     try {
-        const run = store.latestRun(week);
-        if (!run) throw new Error(`No completed run for ${week}`);
-        const snapshots = store.getRunDocuments(run.run_id);
-        if (!snapshots.length) {
-            throw new Error(
-                `Run ${run.run_id} has no document snapshots; run the digest again to regenerate snapshots`,
-            );
+        const from = weekStart(week);
+        if (!from) throw new Error(`Invalid week: ${week}`);
+        const to = new Date(new Date(`${from}T00:00:00Z`).getTime() + 7 * 86400000)
+            .toISOString()
+            .slice(0, 10);
+        const papers = store.papersBetween(from, to);
+        if (!papers.length) {
+            throw new Error(`No cached papers for ${week}; run the digest for that week first`);
         }
-        const wanted = categoryId
-            ? snapshots.filter((snapshot) => snapshot.category_id === categoryId)
-            : snapshots;
-        if (!wanted.length) {
+        const results = new Map<string, ClassificationResult>();
+        for (const paper of papers) {
+            const cached = store.getClassification(
+                classificationCacheKey(paper, cfg, cfg.topics.hash),
+            );
+            if (cached) results.set(paper.arxivId, cached);
+        }
+        const classified = sortPapers(
+            papers
+                .filter((paper) => results.has(paper.arxivId))
+                .map((paper) => ({ ...paper, classification: results.get(paper.arxivId)! })),
+        );
+        if (!classified.length) {
+            throw new Error(`No cached classifications for ${week}; run the digest first`);
+        }
+        const documents = buildDocuments(
+            classified,
+            cfg.topics,
+            {
+                from: new Date(`${from}T00:00:00Z`),
+                to: new Date(`${to}T00:00:00Z`),
+                week,
+            },
+            configHash(cfg),
+            new Date().toISOString(),
+            papers.length,
+        ).filter((document) => !categoryId || document.categoryId === categoryId);
+        if (!documents.length) {
             throw new Error(`No snapshot for category ${categoryId} in ${week}`);
         }
-        const documents = wanted.map((snapshot) => JSON.parse(snapshot.document_json) as DigestDocument);
-        const markdown = wanted.map((snapshot) => String(snapshot.markdown ?? '')).join('');
-        return { runId: run.run_id, week, markdown, documents };
+        const renderer = new MarkdownRenderer();
+        return {
+            week,
+            documents,
+            markdown: documents.map((document) => renderer.render(document)).join(''),
+        };
     } finally {
         store.close();
     }
 }
 
-export type RetryStage = 'fetch' | 'classify';
-
-export interface RetryOptions {
-    root: string;
-    invoker?: LlmInvoker;
-    crawler?: PaperCrawler;
-    logger?: Logger;
-}
-
-export interface RetryResult {
-    runId: string;
-    targetRunId: string;
-    stage: RetryStage;
-    retried: number;
-    succeeded: number;
-    failed: number;
-    errors: number;
-    status: string;
-}
-
-/**
- * Stage-scoped retry for a previously recorded run. Only the selected stage is
- * re-executed (classification retries only the papers that failed there); a
- * later `digest run` regenerates the digest from the refreshed caches.
- */
-export async function retryRun(
-    cfg: Config,
-    targetRunId: string,
-    stage: RetryStage,
-    opts: RetryOptions,
-): Promise<RetryResult> {
-    const store = new Store(join(opts.root, '.cache/weekly-digest.sqlite'));
-    const target = store.getRun(targetRunId);
-    if (!target) {
-        store.close();
-        throw new Error(`Unknown run: ${targetRunId}`);
-    }
-    const runId = randomUUID();
-    const logger = opts.logger ?? new Logger({ runId });
-    const startedMs = Date.now();
-    store.startRun({
-        runId,
-        week: target.week,
-        from: target.from_date,
-        to: target.to_date,
-        configHash: target.config_hash,
-        startedAt: new Date().toISOString(),
-    });
-    logger.info('retry_start', { stage, target_run: targetRunId, week: target.week });
-
-    try {
-        if (stage === 'fetch') {
-            const crawler = opts.crawler ?? createCrawler(cfg.source.provider, store, {
-                baseUrl: cfg.source.base_url,
-                arxivBaseUrl: cfg.source.arxiv_base_url,
-                delay: cfg.source.request_delay_ms,
-                timeout: cfg.source.timeout_ms,
-                userAgent: cfg.source.user_agent,
-                force: true,
-                maxPapers: cfg.source.max_papers,
-                concurrency: cfg.source.concurrency,
-                logger,
-            });
-            const window: Window = {
-                from: new Date(target.from_date),
-                to: new Date(target.to_date),
-                week: target.week,
-            };
-            let papers = 0;
-            let crawlErrors = 0;
-            for (const category of cfg.resolvedCategories) {
-                const result = await crawler.fetchCategory(category, window.from, window.to);
-                for (const error of result.errors) store.addCrawlError(runId, error);
-                for (const paper of result.papers) {
-                    store.savePaper(paper);
-                    papers += 1;
-                }
-                crawlErrors += result.errors.length;
-            }
-            const status = crawlErrors ? 'error' : 'ok';
-            store.finishRun(runId, status, { stage: 'fetch', papers, errors: crawlErrors });
-            logger.info('retry_end', {
-                stage,
-                retried: papers,
-                succeeded: papers,
-                failed: crawlErrors,
-                status,
-                elapsed_ms: elapsed(startedMs),
-            });
-            return { runId, targetRunId, stage, retried: papers, succeeded: papers, failed: crawlErrors, errors: crawlErrors, status };
-        }
-
-        const invoker = opts.invoker;
-        if (!invoker) throw new Error(`No LlmInvoker configured for retry --stage ${stage}`);
-
-        const taxonomy = cfg.topics;
-        const failed = new Set(
-            store.agentErrorsForRun(targetRunId, 'classify').map((entry) => entry.arxiv_id as string),
-        );
-        const targets = store
-            .papersForRun(targetRunId)
-            .map((row) => rowToPaper(row))
-            .filter((paper) => failed.has(paper.arxivId));
-        let succeeded = 0;
-        let failedCount = 0;
-        // Retry in batches; a failed batch falls back to per-paper retries so
-        // one malformed response does not lose the whole batch.
-        for (const batch of chunk(targets, CLASSIFICATION_BATCH_SIZE)) {
-            try {
-                const batchResults = await classifyPapers(batch, taxonomy, cfg.llm, invoker, logger);
-                for (const [arxivId, classification] of batchResults) {
-                    const paper = batch.find((entry) => entry.arxivId === arxivId)!;
-                    store.saveClassification(
-                        classificationCacheKey(paper, cfg, taxonomy.hash),
-                        paper,
-                        {
-                            taxonomyHash: taxonomy.hash,
-                            promptVersion: CLASSIFICATION_PROMPT_VERSION,
-                            agentVersion: LLM_CLIENT_VERSION,
-                            provider: cfg.llm.base_url ?? '',
-                            model: cfg.llm.model,
-                        },
-                        classification,
-                    );
-                    succeeded += 1;
-                    logger.info('retry_item', { stage, arxiv_id: arxivId, ok: true });
-                }
-            } catch (batchError) {
-                logger.warn('batch_error', {
-                    stage,
-                    batch_size: batch.length,
-                    error: batchError instanceof Error ? batchError.message : String(batchError),
-                });
-                for (const paper of batch) {
-                    try {
-                        const classification = await classifyPapers([paper], taxonomy, cfg.llm, invoker, logger);
-                        store.saveClassification(
-                            classificationCacheKey(paper, cfg, taxonomy.hash),
-                            paper,
-                            {
-                                taxonomyHash: taxonomy.hash,
-                                promptVersion: CLASSIFICATION_PROMPT_VERSION,
-                                agentVersion: LLM_CLIENT_VERSION,
-                                provider: cfg.llm.base_url ?? '',
-                                model: cfg.llm.model,
-                            },
-                            classification.get(paper.arxivId)!,
-                        );
-                        succeeded += 1;
-                        logger.info('retry_item', { stage, arxiv_id: paper.arxivId, ok: true });
-                    } catch (error) {
-                        failedCount += 1;
-                        store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.llm.max_retries);
-                        logger.warn('retry_item', {
-                            stage,
-                            arxiv_id: paper.arxivId,
-                            ok: false,
-                            error: error instanceof Error ? error.message : String(error),
-                        });
-                    }
-                }
-            }
-        }
-        const status = failedCount ? 'error' : 'ok';
-        store.finishRun(runId, status, { stage: 'classify', retried: targets.length, succeeded, failed: failedCount, errors: failedCount });
-        logger.info('retry_end', {
-            stage,
-            retried: targets.length,
-            succeeded,
-            failed: failedCount,
-            status,
-            elapsed_ms: elapsed(startedMs),
-        });
-        return { runId, targetRunId, stage, retried: targets.length, succeeded, failed: failedCount, errors: failedCount, status };
-    } catch (error) {
-        store.finishRun(runId, 'error', {
-            errors: 1,
-            message: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-    } finally {
-        store.close();
-    }
+/** Monday (UTC) of the ISO week named by `YYYY-Www`. */
+function weekStart(week: string): string | undefined {
+    const match = /^(\d{4})-W(\d{2})$/.exec(week);
+    if (!match) return undefined;
+    const year = Number(match[1]);
+    const weekNumber = Number(match[2]);
+    if (weekNumber < 1 || weekNumber > 53) return undefined;
+    // ISO-8601: week 1 contains the first Thursday; Jan 4 is always in week 1.
+    const jan4 = new Date(Date.UTC(year, 0, 4));
+    const day = jan4.getUTCDay() || 7;
+    const week1Monday = new Date(jan4);
+    week1Monday.setUTCDate(jan4.getUTCDate() - day + 1);
+    const start = new Date(week1Monday);
+    start.setUTCDate(week1Monday.getUTCDate() + (weekNumber - 1) * 7);
+    return start.toISOString().slice(0, 10);
 }

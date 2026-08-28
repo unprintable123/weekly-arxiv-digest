@@ -24,6 +24,7 @@ describe('loadConfig', () => {
         expect(cfg.resolvedCategories).toEqual(['cs.LG']);
         expect(cfg.output.filename).toBe('weekly-{week}-{category}.md');
         expect(cfg.output.directory).toBe('digests');
+        expect(cfg.output.subdirectory).toBe('{week}');
         expect(cfg.llm.max_retries).toBe(2);
         expect(cfg.window.timezone).toBe('UTC');
         expect(cfg.topics.topics.other).toBeDefined();
@@ -73,5 +74,13 @@ describe('loadConfig', () => {
         const cats = 'categories: [cs.LG]\n';
         await expect(load(`${baseYaml}${cats}output:\n  filename: weekly-{week}.md\n`)).rejects.toThrow(/\{category\}/);
         await expect(load(`${baseYaml}${cats}output:\n  filename: digest.md\n`)).rejects.toThrow(/filename/);
+    });
+
+    it('accepts only the {week} placeholder in output.subdirectory', async () => {
+        const cats = 'categories: [cs.LG]\n';
+        await expect(load(`${baseYaml}${cats}output:\n  subdirectory: "{category}"\n`)).rejects.toThrow(/subdirectory/);
+        await expect(load(`${baseYaml}${cats}output:\n  subdirectory: "{foo}"\n`)).rejects.toThrow(/subdirectory/);
+        await expect(load(`${baseYaml}${cats}output:\n  subdirectory: "{week}"\n`)).resolves.toBeTruthy();
+        await expect(load(`${baseYaml}${cats}output:\n  subdirectory: ""\n`)).resolves.toBeTruthy();
     });
 });

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig, type Config } from '../src/config.js';
 import { Logger } from '../src/log.js';
-import { previewDigest, retryRun, runDigest, type RunResult } from '../src/pipeline.js';
+import { previewDigest, runDigest, type RunResult } from '../src/pipeline.js';
 import { weekWindow } from '../src/window.js';
 import { fixture, repoTopicsPath, routeContains, stubFetch } from './helpers.js';
 
@@ -19,6 +19,7 @@ source:
   user_agent: weekly-digest-test/0.1
 output:
   directory: digests
+  subdirectory: "{week}"
   filename: weekly-{week}-{category}.md
 llm:
   model: test-model
@@ -101,6 +102,8 @@ describe('runDigest', () => {
             expect(result.files).toHaveLength(2);
             expect(result.files[0].endsWith('weekly-2024-W01-llm-architecture.md')).toBe(true);
             expect(result.files[1].endsWith('weekly-2024-W01-llm-physics.md')).toBe(true);
+            // Two-level layout: each week's files live in a "YYYY-Www" subfolder.
+            expect(result.files.every((file) => file.includes(join('digests', '2024-W01')))).toBe(true);
             expect(result.files.every((file) => existsSync(file))).toBe(true);
 
             const architecture = contentFor(result, 'llm-architecture');
@@ -110,7 +113,8 @@ describe('runDigest', () => {
             expect(architecture).toContain('- **Tag:** `attention`, `linear-attention`');
             expect(architecture).toContain('- **Authors:** Alice Example, Bob Sample');
             expect(architecture).toContain('[2401.01234](https://arxiv.org/abs/2401.01234)');
-            expect(architecture).toContain('- **Source:** [papers.cool](https://papers.cool');
+            expect(architecture).toContain('- **papers.cool:** [2401.01234](https://papers.cool/arxiv/2401.01234)');
+            expect(architecture).not.toContain('Source:');
             expect(architecture).not.toContain('Score');
             expect(architecture).not.toContain('中文');
 
@@ -119,13 +123,13 @@ describe('runDigest', () => {
             expect(physics).toContain('## Attention Is All You Need: A Study of Scalable Attention');
             expect(physics).not.toContain('Mixture of Experts');
 
-            // Snapshots exist for every category document.
+            // Papers and classifications are cached for repeat runs and preview.
             const { Store } = await import('../src/db.js');
             const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
             try {
-                expect(store.getRunDocuments(result.runId)).toHaveLength(2);
-                expect(store.getRunDocument(result.runId, 'llm-physics')).toBeTruthy();
-                expect(store.getRunDocument(result.runId, 'llm-physics').markdown).toBe(physics);
+                expect(store.stats().papers).toBe(2);
+                expect(store.stats().classifications).toBe(2);
+                expect(store.stats().fetches).toBeGreaterThan(0);
             } finally {
                 store.close();
             }
@@ -204,7 +208,7 @@ describe('runDigest', () => {
         }
     });
 
-    it('skips writing files in dry-run mode but records snapshots', async () => {
+    it('skips writing files in dry-run mode without touching digests', async () => {
         const root = makeRoot();
         try {
             const cfg = await loadRootConfig(root);
@@ -243,7 +247,6 @@ describe('runDigest', () => {
             stubCrawl();
             let output = '';
             const logger = new Logger({
-                runId: 'test-run',
                 debug: true,
                 stream: { write: (chunk: string) => { output += chunk; return true; } } as NodeJS.WritableStream,
             });
@@ -354,7 +357,7 @@ describe('runDigest', () => {
         }
     });
 
-    it('records an agent error when per-paper classification also fails', async () => {
+    it('re-classifies failed papers on a re-run instead of recording errors', async () => {
         const root = makeRoot();
         try {
             const cfg = await loadRootConfig(root);
@@ -362,6 +365,8 @@ describe('runDigest', () => {
             const invoker = {
                 complete: vi.fn(async (prompt: string) => {
                     if (prompt.includes('Mixture of Experts') && failMoe) {
+                        // Keep failing until the retry run below flips the flag.
+                        if (invoker.complete.mock.calls.length >= 2) failMoe = false;
                         throw new Error('moe classify boom');
                     }
                     const entries: { id: string; categories: string[]; tags: string[] }[] = [];
@@ -376,21 +381,23 @@ describe('runDigest', () => {
             };
             stubCrawl();
 
-            const result = await runDigest(cfg, window(), { root, invoker });
-            expect(result.errors).toBe(1);
-            expect(result.status).toBe('error');
+            const first = await runDigest(cfg, window(), { root, invoker });
+            expect(first.errors).toBe(1);
+            expect(first.status).toBe('error');
             // The other paper is still classified and written.
-            expect(result.documents[0].papers.map((paper) => paper.arxivId)).toEqual(['2401.01234']);
+            expect(first.documents[0].papers.map((paper) => paper.arxivId)).toEqual(['2401.01234']);
 
-            // The retry only re-classifies the single failed paper.
-            failMoe = false;
-            const callsBefore = invoker.complete.mock.calls.length;
-            const retry = await retryRun(cfg, result.runId, 'classify', { root, invoker });
-            expect(retry.retried).toBe(1);
-            expect(retry.succeeded).toBe(1);
-            expect(retry.failed).toBe(0);
-            expect(retry.status).toBe('ok');
-            expect(invoker.complete.mock.calls.length).toBe(callsBefore + 1);
+            // Errors are not stored; re-running the digest naturally retries
+            // only the paper without a cached classification (cache miss).
+            const rerun = await runDigest(cfg, window(), { root, invoker });
+            expect(rerun.errors).toBe(0);
+            expect(rerun.status).toBe('ok');
+            expect(rerun.documents[0].papers.map((paper) => paper.arxivId)).toEqual([
+                '2401.01235',
+                '2401.01234',
+            ]);
+            // Only the failed paper was re-classified.
+            expect(invoker.complete.mock.calls.length).toBe(4);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -398,7 +405,7 @@ describe('runDigest', () => {
 });
 
 describe('previewDigest', () => {
-    it('replays stored snapshots for one or all categories without new agent work', async () => {
+    it('rebuilds one or all categories from the caches without new agent work', async () => {
         const root = makeRoot();
         try {
             const cfg = await loadRootConfig(root);
@@ -407,20 +414,27 @@ describe('previewDigest', () => {
             const first = await runDigest(cfg, window(), { root, invoker });
             const agentCalls = invoker.complete.mock.calls.length;
 
-            const all = previewDigest(root, '2024-W01');
+            const all = previewDigest(root, cfg, '2024-W01');
             expect(all.documents).toHaveLength(2);
-            expect(all.markdown).toBe(contentFor(first, 'llm-architecture') + contentFor(first, 'llm-physics'));
+            // Preview output matches the run's rendered files modulo the
+            // fresh "Generated" timestamp.
+            const stripGenerated = (text: string): string =>
+                text.replace(/- Generated: .*/g, '- Generated: X');
+            expect(stripGenerated(all.markdown)).toBe(
+                stripGenerated(contentFor(first, 'llm-architecture') + contentFor(first, 'llm-physics')),
+            );
 
-            const one = previewDigest(root, '2024-W01', 'llm-architecture');
+            const one = previewDigest(root, cfg, '2024-W01', 'llm-architecture');
             expect(one.documents).toHaveLength(1);
             expect(one.documents[0].categoryId).toBe('llm-architecture');
-            expect(one.markdown).toBe(contentFor(first, 'llm-architecture'));
+            expect(stripGenerated(one.markdown)).toBe(stripGenerated(contentFor(first, 'llm-architecture')));
 
-            // Preview never calls the agent.
+            // Preview never calls the agent or the network.
             expect(invoker.complete.mock.calls.length).toBe(agentCalls);
 
-            expect(() => previewDigest(root, '2024-W01', 'missing-category')).toThrow(/No snapshot/);
-            expect(() => previewDigest(root, '1999-W01')).toThrow(/No completed run/);
+            expect(() => previewDigest(root, cfg, '2024-W01', 'missing-category')).toThrow(/No snapshot/);
+            expect(() => previewDigest(root, cfg, '1999-W01')).toThrow(/No cached papers/);
+            expect(() => previewDigest(root, cfg, 'not-a-week')).toThrow(/Invalid week/);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

@@ -8,7 +8,6 @@ export type Paper = {
   publishedAt: string;
   updatedAt?: string;
   detailUrl: string;
-  sourceUrl: string;
   contentHash: string;
 };
 

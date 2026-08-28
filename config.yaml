@@ -14,7 +14,7 @@ source:
   request_delay_ms: 400
   timeout_ms: 20000
   user_agent: "weekly-digest/0.1"
-  concurrency: 4
+  concurrency: 5
 
 window:
   timezone: "UTC"
@@ -23,6 +23,8 @@ window:
 
 output:
   directory: "digests"
+  # Each week's Markdown files are written into a "YYYY-Www" subfolder.
+  subdirectory: "{week}"
   # One Markdown file per week and per classification category.
   filename: "weekly-{week}-{category}.md"
 

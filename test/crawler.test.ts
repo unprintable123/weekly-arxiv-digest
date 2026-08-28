@@ -75,7 +75,6 @@ describe('PapersCoolCrawler', () => {
         expect(paper.categories).toEqual(['cs.LG', 'cs.AI']);
         expect(paper.publishedAt).toBe('2024-01-01T00:00:00.000Z');
         expect(paper.detailUrl).toBe('https://arxiv.org/abs/2401.01234');
-        expect(paper.sourceUrl).toContain('/arxiv/cs.LG');
         expect(paper.contentHash).toBeTruthy();
 
         cleanup();
@@ -126,7 +125,6 @@ describe('PapersCoolCrawler', () => {
         expect(result.papers[0].version).toBe('v2');
         expect(result.papers[0].title).toBe('New Version Title');
         expect(result.papers[0].abstractEn).toBe('Abstract v2.');
-        expect(result.papers[0].sourceUrl).toBeDefined();
 
         cleanup();
     });

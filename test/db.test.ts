@@ -46,22 +46,20 @@ afterEach(() => {
     renameCalls = 0;
 });
 
-const paper = (id: string): Paper => ({
+const paper = (id: string, publishedAt = '2024-01-02T00:00:00.000Z'): Paper => ({
     arxivId: id,
     title: `Paper ${id}`,
     authors: ['Alice'],
     categories: ['cs.LG'],
     abstractEn: 'Abstract text.',
-    publishedAt: '2024-01-02T00:00:00.000Z',
+    publishedAt,
     detailUrl: `https://arxiv.org/abs/${id}`,
-    sourceUrl: `https://papers.cool/arxiv/${id}`,
     contentHash: `hash-${id}`,
 });
 
 const meta = {
-    taxonomyHash: 'tax-1',
     promptVersion: 'v1',
-    agentVersion: '0.84.3',
+    agentVersion: 'chat-completions-v1',
     provider: 'test',
     model: 'test-model',
 };
@@ -97,13 +95,9 @@ describe('classification cache', () => {
             store.savePaper(paper('2401.01234'));
             store.saveClassification('key-a', paper('2401.01234'), meta, result('llm-architecture'));
             expect(store.getClassification('key-b')).toBeUndefined();
-            // Changing the taxonomy hash must produce a miss.
-            store.saveClassification(
-                'key-c',
-                paper('2401.01234'),
-                { ...meta, taxonomyHash: 'tax-2' },
-                result('other'),
-            );
+            // Rows no longer carry a taxonomy hash column; key isolation is the
+            // only invalidation signal, and different keys stay independent.
+            store.saveClassification('key-c', paper('2401.01234'), meta, result('other'));
             expect(store.getClassification('key-c')?.categories).toEqual(['other']);
         } finally {
             cleanup();
@@ -111,65 +105,58 @@ describe('classification cache', () => {
     });
 });
 
-describe('run documents', () => {
-    it('stores one snapshot per (run, category)', () => {
+describe('clearClassifications', () => {
+    it('deletes everything without a cutoff, only stale rows with one', () => {
         const { store, cleanup } = makeStore();
         try {
-            const doc = (categoryId: string) => ({
-                week: '2024-W01',
-                from: '2024-01-01',
-                to: '2024-01-08',
-                categoryId,
-                categoryName: categoryId,
-                generatedAt: '2024-01-08T00:00:00.000Z',
-                configHash: 'abc',
-                candidateCount: 2,
-                papers: [],
-            });
-            store.saveRunDocument('run-1', '2024-W01', 'llm-architecture', doc('llm-architecture'), 'md-a', 'f-a.md');
-            store.saveRunDocument('run-1', '2024-W01', 'agent-design', doc('agent-design'), 'md-b', 'f-b.md');
-            // Overwrite is allowed for the same key.
-            store.saveRunDocument('run-1', '2024-W01', 'llm-architecture', doc('llm-architecture'), 'md-a2', 'f-a.md');
+            store.savePaper(paper('2401.01234'));
+            store.saveClassification('k1', paper('2401.01234'), meta, result('other'));
+            // Everything was just written, so nothing is older than 30 days.
+            expect(store.clearClassifications(30)).toBe(0);
+            expect(store.getClassification('k1')).toBeDefined();
 
-            expect(store.getRunDocuments('run-1').map((row) => row.category_id)).toEqual([
-                'agent-design',
-                'llm-architecture',
-            ]);
-            expect(store.getRunDocument('run-1', 'llm-architecture').markdown).toBe('md-a2');
-            expect(store.getRunDocument('run-1', 'missing')).toBeUndefined();
+            // age=0 removes all rows recorded before "now".
+            expect(store.clearClassifications(0)).toBe(1);
+            expect(store.getClassification('k1')).toBeUndefined();
+
+            store.saveClassification('k2', paper('2401.01234'), meta, result('llm-physics'));
+            expect(store.clearClassifications()).toBe(1);
+            expect(store.getClassification('k2')).toBeUndefined();
+            expect(store.stats().classifications).toBe(0);
         } finally {
             cleanup();
         }
     });
+});
 
-    it('migrates a legacy single-document run_documents table without data loss', () => {
+describe('paper window queries', () => {
+    it('returns papers inside the half-open [from, to) window', () => {
+        const { store, cleanup } = makeStore();
+        try {
+            store.savePaper(paper('2401.01234', '2024-01-01T00:00:00.000Z'));
+            store.savePaper(paper('2401.01235', '2024-01-07T23:59:59.000Z'));
+            store.savePaper(paper('2401.01236', '2024-01-08T00:00:00.000Z'));
+
+            const papers = store.papersBetween('2024-01-01', '2024-01-08');
+            expect(papers.map((entry) => entry.arxivId)).toEqual(['2401.01234', '2401.01235']);
+        } finally {
+            cleanup();
+        }
+    });
+});
+
+describe('meta table', () => {
+    it('stores and overwrites byte-stable generation timestamps', () => {
         const { store, dir, cleanup } = makeStore();
         try {
-            // Degrade the table to the legacy shape used by the previous schema.
-            store.db.exec('DROP TABLE run_documents');
-            store.db.exec(`CREATE TABLE run_documents (
-                run_id TEXT PRIMARY KEY,
-                week TEXT,
-                document_json TEXT,
-                markdown TEXT,
-                file TEXT,
-                created_at TEXT
-            )`);
-            store.db.exec(
-                `INSERT INTO run_documents VALUES ('legacy-run', '2023-W50', '{}', 'legacy md', 'old.md', '2023-01-01')`,
-            );
-            // Also drop the newer run_papers column to exercise ensureColumn.
-            store.db.exec('DROP TABLE run_papers');
-            store.db.exec('CREATE TABLE run_papers (run_id TEXT, arxiv_id TEXT, included INTEGER, reason TEXT, sort_order INTEGER, PRIMARY KEY(run_id, arxiv_id))');
-            store.close();
+            expect(store.getMeta('generated_at:2024-W01:abc')).toBeUndefined();
+            store.setMeta('generated_at:2024-W01:abc', '2024-01-08T00:00:00.000Z');
+            store.setMeta('generated_at:2024-W01:abc', '2024-01-09T00:00:00.000Z');
+            expect(store.getMeta('generated_at:2024-W01:abc')).toBe('2024-01-09T00:00:00.000Z');
 
+            store.close();
             const reopened = new Store(join(dir, 'cache.sqlite'));
-            expect(existsSync(join(dir, 'cache.sqlite'))).toBe(true);
-            const legacy = reopened.getRunDocument('legacy-run', '');
-            expect(legacy?.markdown).toBe('legacy md');
-            // New multi-category writes work after migration.
-            reopened.saveRunDocument('new-run', '2024-W01', 'rag', {}, 'md', 'f.md');
-            expect(reopened.getRunDocuments('new-run')).toHaveLength(1);
+            expect(reopened.getMeta('generated_at:2024-W01:abc')).toBe('2024-01-09T00:00:00.000Z');
             reopened.close();
         } finally {
             cleanup();
@@ -207,22 +194,6 @@ describe('stats and prune', () => {
         const { store, cleanup } = makeStore();
         try {
             expect(() => store.prune(-1)).toThrow(/non-negative/);
-        } finally {
-            cleanup();
-        }
-    });
-});
-
-describe('agent errors', () => {
-    it('records errors per run and stage', () => {
-        const { store, cleanup } = makeStore();
-        try {
-            store.addAgentError('run-1', 'classify', '2401.01234', new Error('boom'), 2);
-            const errors = store.agentErrorsForRun('run-1', 'classify');
-            expect(errors).toHaveLength(1);
-            expect(errors[0].stage).toBe('classify');
-            expect(errors[0].message).toBe('boom');
-            expect(store.agentErrorsForRun('run-1', 'fetch')).toHaveLength(0);
         } finally {
             cleanup();
         }
@@ -268,7 +239,7 @@ describe('replaceFileOver', () => {
             const target = join(dir, 'target.txt');
             writeFileSync(source, 'new');
             failTimes('EBUSY', Number.MAX_SAFE_INTEGER);
-            // makeStore's constructor migrations also pass through the mocked
+            // makeStore's Store constructor also passes through the mocked
             // renameSync; measure only the calls made by this helper.
             renameCalls = 0;
             expect(() => replaceFileOver(source, target)).toThrow(/EBUSY/);

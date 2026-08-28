@@ -6,7 +6,7 @@ import { loadConfig } from './config.js';
 import { Store } from './db.js';
 import { Logger } from './log.js';
 import { ChatCompletionClient } from './llm.js';
-import { previewDigest, retryRun, runDigest, type RetryStage } from './pipeline.js';
+import { previewDigest, runDigest } from './pipeline.js';
 import { weekWindow } from './window.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,8 +33,7 @@ async function main(): Promise<void> {
         console.log(
             'pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force] [--dry-run] [--debug] [--trace FILE]\n' +
             'pnpm digest preview --week YYYY-Www [--category TOPIC_ID] [--config config.yaml]\n' +
-            'pnpm digest retry --run <run-id> --stage fetch|classify [--config config.yaml] [--debug]\n' +
-            'pnpm digest cache stats|prune [--older-than DAYS]',
+            'pnpm digest cache stats|prune [--older-than DAYS]|clear-classifications [--older-than DAYS]',
         );
         return;
     }
@@ -60,7 +59,6 @@ async function main(): Promise<void> {
         );
         console.log(
             JSON.stringify({
-                run_id: result.runId,
                 files: result.files,
                 categories: result.documents.map((document) => document.categoryId),
                 stats: {
@@ -76,37 +74,6 @@ async function main(): Promise<void> {
         return;
     }
 
-    if (command === 'retry') {
-        const runId = value('--run');
-        const stage = value('--stage');
-        if (!runId || !['fetch', 'classify'].includes(stage || '')) {
-            throw new Error('Usage: retry --run RUN_ID --stage fetch|classify');
-        }
-        const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
-        const result = await retryRun(cfg, runId, stage as RetryStage, {
-            root,
-            invoker: new ChatCompletionClient(),
-            logger: makeLogger(),
-        });
-        console.log(
-            JSON.stringify({
-                run_id: result.runId,
-                target_run: result.targetRunId,
-                stage: result.stage,
-                retried: result.retried,
-                succeeded: result.succeeded,
-                failed: result.failed,
-                errors: result.errors,
-                status: result.status,
-            }),
-        );
-        if (result.retried > 0) {
-            console.error('Run `pnpm digest run` again to regenerate the digest from refreshed caches.');
-        }
-        if (result.errors) process.exitCode = 1;
-        return;
-    }
-
     if (command === 'cache') {
         const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
         try {
@@ -114,8 +81,14 @@ async function main(): Promise<void> {
                 console.log(JSON.stringify(store.stats()));
             } else if (args[1] === 'prune') {
                 console.log(JSON.stringify({ deleted: store.prune(Number(value('--older-than') || 30)) }));
+            } else if (args[1] === 'clear-classifications') {
+                // Drop the stored classification cache so papers are re-classified
+                // on the next run (all entries, or only those older than DAYS).
+                const raw = value('--older-than');
+                const olderThan = raw === undefined ? undefined : Number(raw);
+                console.log(JSON.stringify({ deleted: store.clearClassifications(olderThan) }));
             } else {
-                throw new Error('Usage: cache stats|prune');
+                throw new Error('Usage: cache stats|prune|clear-classifications');
             }
         } finally {
             store.close();
@@ -124,9 +97,10 @@ async function main(): Promise<void> {
     }
 
     if (command === 'preview') {
-        // Preview never touches the network or the agent: it replays the stored
-        // run snapshots for one category or all of them.
-        const preview = previewDigest(root, value('--week') || '', value('--category'));
+        // Preview never touches the network or the agent: it rebuilds the week's
+        // documents from stored papers plus the classification cache.
+        const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
+        const preview = previewDigest(root, cfg, value('--week') || '', value('--category'));
         process.stdout.write(preview.markdown.endsWith('\n') ? preview.markdown : `${preview.markdown}\n`);
         return;
     }

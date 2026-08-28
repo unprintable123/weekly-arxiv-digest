@@ -45,7 +45,7 @@ groups:
         tags: [scaling-laws, training-dynamics, loss-landscape, optimization-stability, grokking, phase-transition]
       - id: llm-efficiency
         name: 模型效率与压缩
-        description: 减少显存、计算、延迟或能耗的量化、剪枝、蒸馏、稀疏化和推理优化。
+        description: 减少显存、计算、延迟或能耗的量化、剪枝、蒸馏、稀疏化和推理优化。一些infra层面的东西（比如DSL优化，latency优化）也应当归入此类。
         tags: [quantization, pruning, distillation, sparsity, inference-acceleration, memory-efficiency]
       - id: llm-knowledge
         name: 知识与记忆

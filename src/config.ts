@@ -55,10 +55,14 @@ const schema = z.strictObject({
   output: z
     .strictObject({
       directory: z.string().default('digests'),
+      // Week subfolder for the two-level layout (e.g. "2026-W34"); an empty
+      // string keeps a single-level output layout.
+      subdirectory: z.string().default('{week}'),
       filename: z.string().default('weekly-{week}-{category}.md'),
     })
     .default({
       directory: 'digests',
+      subdirectory: '{week}',
       filename: 'weekly-{week}-{category}.md',
     }),
   llm: z
@@ -115,6 +119,14 @@ export async function loadConfig(
 
   if (!raw.output.filename.includes('{week}') || !raw.output.filename.includes('{category}')) {
     throw new Error('output.filename must contain both {week} and {category} placeholders');
+  }
+
+  // Only the {week} placeholder is valid inside the week subfolder.
+  const subdirectoryPlaceholders = [...raw.output.subdirectory.matchAll(/\{([^}]*)\}/g)].map(
+    (match) => match[1],
+  );
+  if (subdirectoryPlaceholders.some((name) => name !== 'week')) {
+    throw new Error('output.subdirectory may only use the {week} placeholder');
   }
 
   return { ...raw, resolvedCategories, topics };

@@ -23,7 +23,6 @@ export function rowToPaper(row: any): Paper {
     publishedAt: row.published_at,
     updatedAt: row.updated_at || undefined,
     detailUrl: row.detail_url,
-    sourceUrl: row.source_url,
     contentHash: row.content_hash,
   };
 }
@@ -98,46 +97,30 @@ class Statement {
 }
 
 class SqliteStore {
-  private inTransaction = false;
-
   constructor(
     readonly database: SqliteDatabase,
     private readonly file: string,
   ) { }
 
   prepare(sql: string): Statement {
-    // Every write is flushed to disk atomically so an interrupted process
-    // never loses cache/run state and never leaves a corrupt database file.
-    return new Statement(this.database, sql, () => this.persistIfIdle());
+    return new Statement(this.database, sql);
   }
 
   exec(sql: string): void {
     this.database.exec(sql);
-    this.persistIfIdle();
   }
 
   pragma(_value: string): void { }
 
   transaction<T>(callback: () => T): () => T {
     return () => {
-      this.inTransaction = true;
       this.database.exec('BEGIN');
       try {
-        const result = callback();
-        this.database.exec('COMMIT');
-        this.persist();
-        return result;
-      } catch (error) {
-        this.database.exec('ROLLBACK');
-        throw error;
+        return callback();
       } finally {
-        this.inTransaction = false;
+        this.database.exec('COMMIT');
       }
     };
-  }
-
-  private persistIfIdle(): void {
-    if (!this.inTransaction) this.persist();
   }
 
   /** Write a snapshot to a temp file then atomically rename over the target. */
@@ -175,7 +158,6 @@ CREATE TABLE IF NOT EXISTS papers (
   published_at TEXT,
   updated_at TEXT,
   detail_url TEXT,
-  source_url TEXT,
   content_hash TEXT,
   fetched_at TEXT
 );
@@ -187,36 +169,14 @@ CREATE TABLE IF NOT EXISTS fetch_cache (
   etag TEXT,
   last_modified TEXT,
   expires_at TEXT,
-  error TEXT,
   fetched_at TEXT
-);
-CREATE TABLE IF NOT EXISTS runs (
-  run_id TEXT PRIMARY KEY,
-  week TEXT,
-  from_date TEXT,
-  to_date TEXT,
-  config_hash TEXT,
-  started_at TEXT,
-  ended_at TEXT,
-  status TEXT,
-  stats_json TEXT
-);
-CREATE TABLE IF NOT EXISTS run_papers (
-  run_id TEXT,
-  arxiv_id TEXT,
-  included INTEGER,
-  reason TEXT,
-  sort_order INTEGER,
-  classification_key TEXT,
-  PRIMARY KEY(run_id, arxiv_id)
 );
 CREATE TABLE IF NOT EXISTS classification_cache (
   cache_key TEXT PRIMARY KEY,
   arxiv_id TEXT,
   content_hash TEXT,
-  taxonomy_hash TEXT,
   prompt_version TEXT,
-  agent_version TEXT,
+  client_version TEXT,
   provider TEXT,
   model TEXT,
   categories_json TEXT,
@@ -225,35 +185,9 @@ CREATE TABLE IF NOT EXISTS classification_cache (
   status TEXT,
   created_at TEXT
 );
-CREATE TABLE IF NOT EXISTS agent_errors (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT,
-  stage TEXT,
-  arxiv_id TEXT,
-  error_type TEXT,
-  retries INTEGER,
-  message TEXT,
-  created_at TEXT
-);
-CREATE TABLE IF NOT EXISTS crawl_errors (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT,
-  stage TEXT,
-  category TEXT,
-  arxiv_id TEXT,
-  url TEXT,
-  message TEXT,
-  created_at TEXT
-);
-CREATE TABLE IF NOT EXISTS run_documents (
-  run_id TEXT,
-  category_id TEXT,
-  week TEXT,
-  document_json TEXT,
-  markdown TEXT,
-  file TEXT,
-  created_at TEXT,
-  PRIMARY KEY(run_id, category_id)
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
 );
 `;
 
@@ -267,47 +201,15 @@ export class Store {
     this.db = new SqliteStore(database, file);
     this.db.pragma('journal_mode = WAL');
     this.db.exec(SCHEMA);
-    this.migrate();
-  }
-
-  /**
-   * Forward-compatible migrations for databases created by older versions.
-   * Legacy tables (relevance_cache, translation_cache, llm_errors) are kept
-   * untouched but no longer read or written.
-   */
-  private migrate(): void {
-    const table = this.db
-      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='run_documents'")
-      .get() as any;
-    if (table && !String(table.sql ?? '').includes('category_id')) {
-      // Legacy single-document shape: migrate to (run_id, category_id) primary key.
-      this.db.exec('ALTER TABLE run_documents RENAME TO run_documents_legacy');
-      this.db.exec(`CREATE TABLE run_documents (
-        run_id TEXT,
-        category_id TEXT,
-        week TEXT,
-        document_json TEXT,
-        markdown TEXT,
-        file TEXT,
-        created_at TEXT,
-        PRIMARY KEY(run_id, category_id)
-      )`);
-      this.db.exec(`INSERT INTO run_documents (run_id, category_id, week, document_json, markdown, file, created_at)
-        SELECT run_id, '', week, document_json, markdown, file, created_at FROM run_documents_legacy`);
-      this.db.exec('DROP TABLE run_documents_legacy');
-    }
-    this.ensureColumn('run_papers', 'classification_key', 'classification_key TEXT');
-  }
-
-  private ensureColumn(table: string, column: string, ddl: string): void {
-    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as any[];
-    if (columns.length && !columns.some((entry) => entry.name === column)) {
-      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
-    }
   }
 
   close(): void {
     this.db.close();
+  }
+
+  /** Persist the in-memory database snapshot to disk (atomic temp+rename). */
+  flush(): void {
+    this.db.persist();
   }
 
   getPaper(id: string): Paper | undefined {
@@ -318,7 +220,7 @@ export class Store {
   savePaper(p: Paper): void {
     this.db
       .prepare(
-        `INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        `INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(arxiv_id) DO UPDATE SET
            version=excluded.version,
            title=excluded.title,
@@ -328,7 +230,6 @@ export class Store {
            published_at=excluded.published_at,
            updated_at=excluded.updated_at,
            detail_url=excluded.detail_url,
-           source_url=excluded.source_url,
            content_hash=excluded.content_hash,
            fetched_at=excluded.fetched_at`,
       )
@@ -342,10 +243,16 @@ export class Store {
         p.publishedAt,
         p.updatedAt ?? '',
         p.detailUrl,
-        p.sourceUrl,
         p.contentHash,
         new Date().toISOString(),
       );
+  }
+
+  /** All stored papers published inside the half-open [from, to) window. */
+  papersBetween(from: string, to: string): Paper[] {
+    return (this.db
+      .prepare('SELECT * FROM papers WHERE published_at >= ? AND published_at < ? ORDER BY arxiv_id')
+      .all(from, to) as any[]).map((row) => this.rowPaper(row));
   }
 
   private rowPaper(row: any): Paper {
@@ -356,9 +263,19 @@ export class Store {
     return this.db.prepare('SELECT * FROM fetch_cache WHERE url=?').get(url) as any;
   }
 
-  saveFetch(url: string, data: any): void {
+  saveFetch(url: string, data: {
+    status: number;
+    body: string;
+    bodyHash: string;
+    etag?: string;
+    lastModified?: string;
+    expiresAt?: string;
+  }): void {
+    // Successful responses only: failed requests are retried on the next run
+    // and are never cached, so the table holds no error column.
+    if (data.status !== 200) return;
     this.db
-      .prepare('INSERT OR REPLACE INTO fetch_cache VALUES (?,?,?,?,?,?,?,?,?)')
+      .prepare('INSERT OR REPLACE INTO fetch_cache VALUES (?,?,?,?,?,?,?,?)')
       .run(
         url,
         data.status,
@@ -367,7 +284,6 @@ export class Store {
         data.etag || '',
         data.lastModified || '',
         data.expiresAt || '',
-        data.error || '',
         new Date().toISOString(),
       );
   }
@@ -404,7 +320,6 @@ export class Store {
     key: string,
     p: Paper,
     meta: {
-      taxonomyHash: string;
       promptVersion: string;
       agentVersion: string;
       provider: string;
@@ -413,12 +328,11 @@ export class Store {
     r: ClassificationResult,
   ): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
       .run(
         key,
         p.arxivId,
         p.contentHash,
-        meta.taxonomyHash,
         meta.promptVersion,
         meta.agentVersion,
         meta.provider,
@@ -431,60 +345,32 @@ export class Store {
       );
   }
 
-  addAgentError(runId: string, stage: string, arxivId: string, error: unknown, retries: number): void {
-    const message = error instanceof Error ? error.message : String(error);
+  /**
+   * Delete stored classification results. Without `olderThanDays` the whole
+   * cache is cleared; with it only entries older than the cutoff disappear.
+   * Returns the number of deleted rows.
+   */
+  clearClassifications(olderThanDays?: number): number {
+    if (olderThanDays !== undefined && (!Number.isFinite(olderThanDays) || olderThanDays < 0)) {
+      throw new Error('older-than must be a non-negative number');
+    }
+    const rows = olderThanDays === undefined
+      ? this.db.prepare('DELETE FROM classification_cache').run()
+      : this.db
+        .prepare('DELETE FROM classification_cache WHERE created_at < ?')
+        .run(new Date(Date.now() - olderThanDays * 86400000).toISOString());
+    return rows.changes;
+  }
+
+  getMeta(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key=?').get(key) as any;
+    return row ? String(row.value) : undefined;
+  }
+
+  setMeta(key: string, value: string): void {
     this.db
-      .prepare(
-        'INSERT INTO agent_errors (run_id, stage, arxiv_id, error_type, retries, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      )
-      .run(
-        runId,
-        stage,
-        arxivId,
-        error instanceof Error ? error.name : 'Error',
-        retries,
-        message,
-        new Date().toISOString(),
-      );
-  }
-
-  startRun(run: any): void {
-    this.db
-      .prepare('INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(run.runId, run.week, run.from, run.to, run.configHash, run.startedAt, '', 'running', '{}');
-  }
-
-  finishRun(id: string, status: string, stats: any, endedAt = new Date().toISOString()): void {
-    this.db
-      .prepare('UPDATE runs SET ended_at=?,status=?,stats_json=? WHERE run_id=?')
-      .run(endedAt, status, JSON.stringify(stats), id);
-  }
-
-  addRunPaper(
-    runId: string,
-    id: string,
-    included: boolean,
-    reason: string,
-    order: number,
-    classificationKey = '',
-  ): void {
-    this.db
-      .prepare('INSERT OR REPLACE INTO run_papers VALUES (?,?,?,?,?,?)')
-      .run(runId, id, included ? 1 : 0, reason, order, classificationKey);
-  }
-
-  listRunPapers(runId: string): any[] {
-    return this.db
-      .prepare(
-        'SELECT p.*, rp.included, rp.reason FROM run_papers rp JOIN papers p ON p.arxiv_id=rp.arxiv_id WHERE rp.run_id=? ORDER BY rp.sort_order',
-      )
-      .all(runId) as any[];
-  }
-
-  latestRun(week: string): any {
-    return this.db
-      .prepare('SELECT * FROM runs WHERE week=? AND status="ok" ORDER BY ended_at DESC LIMIT 1')
-      .get(week) as any;
+      .prepare('INSERT OR REPLACE INTO meta VALUES (?,?)')
+      .run(key, value);
   }
 
   stats(): any {
@@ -509,81 +395,5 @@ export class Store {
       return deleted;
     });
     return transaction();
-  }
-
-  addCrawlError(runId: string, error: { stage: string; category?: string; arxivId?: string; url: string; message: string }): void {
-    this.db
-      .prepare(
-        'INSERT INTO crawl_errors (run_id, stage, category, arxiv_id, url, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      )
-      .run(
-        runId,
-        error.stage,
-        error.category ?? '',
-        error.arxivId ?? '',
-        error.url,
-        error.message,
-        new Date().toISOString(),
-      );
-  }
-
-  crawlErrorsForRun(runId: string): any[] {
-    return this.db
-      .prepare('SELECT * FROM crawl_errors WHERE run_id=? ORDER BY id')
-      .all(runId) as any[];
-  }
-
-  getRun(runId: string): any {
-    return this.db.prepare('SELECT * FROM runs WHERE run_id=?').get(runId) as any;
-  }
-
-  /** Latest run for a week/config-hash combination (any status). */
-  latestRunForWeek(week: string, configHash: string): any {
-    return this.db
-      .prepare(
-        'SELECT * FROM runs WHERE week=? AND config_hash=? ORDER BY ended_at DESC LIMIT 1',
-      )
-      .get(week, configHash) as any;
-  }
-
-  agentErrorsForRun(runId: string, stage?: string): any[] {
-    const sql = stage
-      ? 'SELECT * FROM agent_errors WHERE run_id=? AND stage=? ORDER BY id'
-      : 'SELECT * FROM agent_errors WHERE run_id=? ORDER BY id';
-    return this.db.prepare(sql).all(runId, stage) as any[];
-  }
-
-  papersForRun(runId: string): any[] {
-    return this.db
-      .prepare(
-        'SELECT p.*, rp.included, rp.reason, rp.sort_order FROM run_papers rp JOIN papers p ON p.arxiv_id=rp.arxiv_id WHERE rp.run_id=? ORDER BY rp.sort_order',
-      )
-      .all(runId) as any[];
-  }
-
-  /** Snapshot one category document for a run. */
-  saveRunDocument(
-    runId: string,
-    week: string,
-    categoryId: string,
-    document: unknown,
-    markdown: string,
-    file: string,
-  ): void {
-    this.db
-      .prepare('INSERT OR REPLACE INTO run_documents VALUES (?,?,?,?,?,?,?)')
-      .run(runId, categoryId, week, JSON.stringify(document), markdown, file, new Date().toISOString());
-  }
-
-  getRunDocument(runId: string, categoryId: string): any {
-    return this.db
-      .prepare('SELECT * FROM run_documents WHERE run_id=? AND category_id=?')
-      .get(runId, categoryId) as any;
-  }
-
-  getRunDocuments(runId: string): any[] {
-    return this.db
-      .prepare('SELECT * FROM run_documents WHERE run_id=? ORDER BY category_id')
-      .all(runId) as any[];
   }
 }

@@ -24,7 +24,6 @@ const paper = (overrides: Partial<Paper> = {}): Paper => ({
     abstractEn: 'We study attention mechanisms and report scaling behavior.',
     publishedAt: '2024-01-02T00:00:00.000Z',
     detailUrl: 'https://arxiv.org/abs/2401.01234',
-    sourceUrl: 'https://papers.cool/arxiv/2401.01234',
     contentHash: 'hash-1',
     ...overrides,
 });

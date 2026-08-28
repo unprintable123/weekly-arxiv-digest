@@ -12,7 +12,7 @@ export const CLASSIFICATION_PROMPT_VERSION = 'v2';
  * Fixed number of papers per classification LLM call. Batching only changes
  * prompt construction; per-paper cache keys and stored results are unchanged.
  */
-export const CLASSIFICATION_BATCH_SIZE = 8;
+export const CLASSIFICATION_BATCH_SIZE = 10;
 
 /**
  * Version of the built-in chat-completion client. Part of the classification
