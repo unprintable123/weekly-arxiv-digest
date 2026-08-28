@@ -1,9 +1,50 @@
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { Store } from '../src/db.js';
+import { describe, expect, it, vi, afterEach } from 'vitest';
+import { replaceFileOver, Store } from '../src/db.js';
 import type { ClassificationResult, Paper } from '../src/types.js';
 import { makeStore } from './helpers.js';
+
+/**
+ * Node's fs ESM namespace cannot be spied on, so src/db.ts's `renameSync`
+ * binding is swapped through a vi.mock indirection pointed at a mutable
+ * implementation that each test installs and afterEach restores. The real
+ * binding is captured via createRequire outside the mocked namespace so the
+ * mock can delegate to it without recursing.
+ */
+const realRename = createRequire(import.meta.url)('node:fs').renameSync as (
+    from: string,
+    to: string,
+) => void;
+let renameImpl: (from: string, to: string) => void = realRename;
+let renameCalls = 0;
+vi.mock('node:fs', async (importOriginal) => {
+    const real = await importOriginal<typeof import('node:fs')>();
+    return {
+        ...real,
+        renameSync: (from: string, to: string) => {
+            renameCalls += 1;
+            return renameImpl(from, to);
+        },
+    };
+});
+
+const failTimes = (code: string, times: number) => {
+    renameImpl = (from, to) => {
+        if (renameCalls <= times) {
+            const error = new Error(`${code}: mocked fs failure`) as NodeJS.ErrnoException;
+            error.code = code;
+            throw error;
+        }
+        realRename(from, to);
+    };
+};
+
+afterEach(() => {
+    renameImpl = realRename;
+    renameCalls = 0;
+});
 
 const paper = (id: string): Paper => ({
     arxivId: id,
@@ -182,6 +223,71 @@ describe('agent errors', () => {
             expect(errors[0].stage).toBe('classify');
             expect(errors[0].message).toBe('boom');
             expect(store.agentErrorsForRun('run-1', 'fetch')).toHaveLength(0);
+        } finally {
+            cleanup();
+        }
+    });
+});
+
+describe('replaceFileOver', () => {
+    it('replaces an existing target file', async () => {
+        const { dir, cleanup } = makeStore();
+        try {
+            const source = join(dir, 'src.txt');
+            const target = join(dir, 'target.txt');
+            writeFileSync(source, 'new');
+            writeFileSync(target, 'old');
+            replaceFileOver(source, target);
+            expect(readFileSync(target, 'utf8')).toBe('new');
+            expect(existsSync(source)).toBe(false);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('retries transient destination locks (EPERM) before succeeding', () => {
+        const { dir, cleanup } = makeStore();
+        try {
+            const source = join(dir, 'src.txt');
+            const target = join(dir, 'target.txt');
+            writeFileSync(source, 'new');
+            writeFileSync(target, 'old');
+            failTimes('EPERM', 1);
+            replaceFileOver(source, target);
+            expect(readFileSync(target, 'utf8')).toBe('new');
+            expect(renameCalls).toBe(2);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('throws after exhausting retries for a persistent lock', () => {
+        const { dir, cleanup } = makeStore();
+        try {
+            const source = join(dir, 'src.txt');
+            const target = join(dir, 'target.txt');
+            writeFileSync(source, 'new');
+            failTimes('EBUSY', Number.MAX_SAFE_INTEGER);
+            // makeStore's constructor migrations also pass through the mocked
+            // renameSync; measure only the calls made by this helper.
+            renameCalls = 0;
+            expect(() => replaceFileOver(source, target)).toThrow(/EBUSY/);
+            expect(renameCalls).toBe(5);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('does not retry non-transient errors', () => {
+        const { dir, cleanup } = makeStore();
+        try {
+            const source = join(dir, 'src.txt');
+            const target = join(dir, 'no-such-dir', 'target.txt');
+            writeFileSync(source, 'new');
+            failTimes('ENOENT', Number.MAX_SAFE_INTEGER);
+            renameCalls = 0;
+            expect(() => replaceFileOver(source, target)).toThrow(/ENOENT/);
+            expect(renameCalls).toBe(1);
         } finally {
             cleanup();
         }

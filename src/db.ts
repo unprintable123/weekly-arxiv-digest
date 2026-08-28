@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import initSqlJs from 'sql.js';
@@ -26,6 +26,33 @@ export function rowToPaper(row: any): Paper {
     sourceUrl: row.source_url,
     contentHash: row.content_hash,
   };
+}
+
+/**
+ * Atomically replace the target file with the source file. On Windows the
+ * destination is commonly locked for milliseconds by antivirus scanners,
+ * file-indexing, or sync tools, so a plain rename fails with EPERM; retry a
+ * few times with a short backoff before giving up.
+ */
+export function replaceFileOver(source: string, target: string): void {
+  const attempts = 5;
+  let delayMs = 50;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      renameSync(source, target);
+      return;
+    } catch (error) {
+      lastError = error;
+      const code = (error as NodeJS.ErrnoException).code;
+      // Retry only transient sharing violations on the destination file.
+      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error;
+      // Synchronous sleep: this helper must stay usable from sync callers.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+      delayMs *= 2;
+    }
+  }
+  throw lastError;
 }
 
 class Statement {
@@ -117,8 +144,18 @@ class SqliteStore {
   persist(): void {
     const buffer = Buffer.from(this.database.export());
     const temporary = `${this.file}.tmp-${process.pid}`;
-    writeFileSync(temporary, buffer);
-    renameSync(temporary, this.file);
+    try {
+      writeFileSync(temporary, buffer);
+      replaceFileOver(temporary, this.file);
+    } catch (error) {
+      // Never leave orphaned temp snapshots behind.
+      try {
+        unlinkSync(temporary);
+      } catch {
+        /* best effort */
+      }
+      throw error;
+    }
   }
 
   close(): void {

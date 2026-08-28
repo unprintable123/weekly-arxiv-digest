@@ -23,5 +23,15 @@ export const slug = (s: string): string =>
     .replace(/^-|-$/g, '')
     .slice(0, 60) || 'general';
 
+/** Split a list into consecutive chunks of at most `size` items. */
+export const chunk = <T>(items: readonly T[], size: number): T[][] => {
+  if (size < 1) throw new Error('chunk size must be at least 1');
+  const out: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    out.push(items.slice(index, index + size));
+  }
+  return out;
+};
+
 export const sleep = (ms: number): Promise<void> =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));

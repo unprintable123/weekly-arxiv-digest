@@ -7,14 +7,21 @@ import { createCrawler, type PaperCrawler } from './crawler.js';
 import { rowToPaper, Store } from './db.js';
 import { Logger, elapsed } from './log.js';
 import {
-    classifyPaper,
+    classifyPapers,
+    CLASSIFICATION_BATCH_SIZE,
     CLASSIFICATION_PROMPT_VERSION,
     LLM_CLIENT_VERSION,
     type LlmInvoker,
 } from './llm.js';
 import { MarkdownRenderer } from './renderer.js';
-import type { ClassifiedPaper, DigestDocument, Paper, Window } from './types.js';
-import { hash } from './util.js';
+import type {
+    ClassifiedPaper,
+    ClassificationResult,
+    DigestDocument,
+    Paper,
+    Window,
+} from './types.js';
+import { chunk, hash } from './util.js';
 
 export interface RunOptions {
     root: string;
@@ -153,30 +160,59 @@ export async function runDigest(
             throw new Error(`Source unavailable: all list fetches failed (${crawlErrorCount} error(s))`);
         }
 
-        // Classify every paper; cache hits never invoke the agent.
+        // Classify every paper; cache hits never invoke the agent. Uncached
+        // papers are grouped into fixed-size batches so one LLM call labels
+        // several papers at once; a failed batch is retried per paper so one
+        // bad response does not lose the whole batch.
         const classificationKeys = new Map<string, string>();
         const limit = pLimit(Math.max(1, cfg.source.concurrency ?? 4));
-        const tasks = [...papers.values()].map((paper) =>
-            limit(async (): Promise<ClassifiedPaper | undefined> => {
-                store.savePaper(paper);
-                const key = classificationCacheKey(paper, cfg, taxonomy.hash);
-                classificationKeys.set(paper.arxivId, key);
-                const classifyMs = Date.now();
-                let classification = opts.force ? undefined : store.getClassification(key);
-                if (classification) {
-                    logger.debug('classify', {
-                        arxiv_id: paper.arxivId,
-                        category: classification.categories[0],
-                        cache_hit: true,
-                        elapsed_ms: elapsed(classifyMs),
-                    });
-                } else {
-                    if (!invoker) throw new Error('No LlmInvoker configured');
-                    try {
-                        classification = await classifyPaper(paper, taxonomy, cfg.llm, invoker, logger);
+        const pending: Paper[] = [];
+        for (const paper of papers.values()) {
+            store.savePaper(paper);
+            classificationKeys.set(paper.arxivId, classificationCacheKey(paper, cfg, taxonomy.hash));
+            if (!opts.force && store.getClassification(classificationKeys.get(paper.arxivId)!)) {
+                logger.debug('classify', {
+                    arxiv_id: paper.arxivId,
+                    category: store.getClassification(classificationKeys.get(paper.arxivId)!)!.categories[0],
+                    cache_hit: true,
+                });
+            } else {
+                pending.push(paper);
+            }
+        }
+
+        const results = new Map<string, ClassificationResult>();
+        for (const paper of papers.values()) {
+            const cached = opts.force ? undefined : store.getClassification(classificationKeys.get(paper.arxivId)!);
+            if (cached) results.set(paper.arxivId, cached);
+        }
+
+        const classifyMs = Date.now();
+        const batches = chunk(pending, CLASSIFICATION_BATCH_SIZE);
+        // Coarse progress for long runs: one info log roughly every 100 papers
+        // (newClassifications is shared, and single-threaded increments cannot
+        // skip a boundary).
+        const PROGRESS_INTERVAL = 100;
+        const logClassifyProgress = () => {
+            if (newClassifications > 0 && newClassifications % PROGRESS_INTERVAL === 0) {
+                logger.info('classify_progress', {
+                    classified: newClassifications,
+                    total: pending.length,
+                });
+            }
+        };
+        const batchTasks = batches.map((batch) =>
+            limit(async (): Promise<void> => {
+                if (!invoker) throw new Error('No LlmInvoker configured');
+                try {
+                    const batchResults = await classifyPapers(batch, taxonomy, cfg.llm, invoker, logger);
+                    for (const [arxivId, classification] of batchResults) {
+                        results.set(arxivId, classification);
                         newClassifications += 1;
+                        logClassifyProgress();
+                        const paper = batch.find((entry) => entry.arxivId === arxivId)!;
                         store.saveClassification(
-                            key,
+                            classificationKeys.get(arxivId)!,
                             paper,
                             {
                                 taxonomyHash: taxonomy.hash,
@@ -188,32 +224,91 @@ export async function runDigest(
                             classification,
                         );
                         logger.debug('classify', {
-                            arxiv_id: paper.arxivId,
+                            arxiv_id: arxivId,
                             category: classification.categories[0],
                             cache_hit: false,
-                            elapsed_ms: elapsed(classifyMs),
                         });
-                    } catch (error) {
-                        // A single classification failure must not lose the rest
-                        // of the run, but the run still reports the error.
-                        errors += 1;
-                        store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.llm.max_retries);
-                        store.addRunPaper(runId, paper.arxivId, false, 'classify-error', 0, key);
-                        logger.warn('agent_error', {
-                            arxiv_id: paper.arxivId,
-                            stage: 'classify',
-                            error_type: error instanceof Error ? error.name : 'Error',
-                            error: error instanceof Error ? error.message : String(error),
-                        });
-                        return undefined;
+                    }
+                } catch (error) {
+                    // The whole batch failed; retry each paper individually so
+                    // one malformed response does not lose the entire batch.
+                    logger.warn('batch_error', {
+                        batch_size: batch.length,
+                        error_type: error instanceof Error ? error.name : 'Error',
+                        error: error instanceof Error ? error.message : String(error),
+                    });
+                    for (const paper of batch) {
+                        try {
+                            const classification = await classifyPapers(
+                                [paper],
+                                taxonomy,
+                                cfg.llm,
+                                invoker,
+                                logger,
+                            );
+                            const classificationResult = classification.get(paper.arxivId)!;
+                            results.set(paper.arxivId, classificationResult);
+                            newClassifications += 1;
+                            logClassifyProgress();
+                            store.saveClassification(
+                                classificationKeys.get(paper.arxivId)!,
+                                paper,
+                                {
+                                    taxonomyHash: taxonomy.hash,
+                                    promptVersion: CLASSIFICATION_PROMPT_VERSION,
+                                    agentVersion: LLM_CLIENT_VERSION,
+                                    provider: cfg.llm.base_url ?? '',
+                                    model: cfg.llm.model,
+                                },
+                                classificationResult,
+                            );
+                            logger.debug('classify', {
+                                arxiv_id: paper.arxivId,
+                                category: classificationResult.categories[0],
+                                cache_hit: false,
+                            });
+                        } catch (paperError) {
+                            // A single classification failure must not lose the
+                            // rest of the run, but the run still reports it.
+                            errors += 1;
+                            store.addAgentError(
+                                runId,
+                                'classify',
+                                paper.arxivId,
+                                paperError,
+                                cfg.llm.max_retries,
+                            );
+                            store.addRunPaper(runId, paper.arxivId, false, 'classify-error', 0, classificationKeys.get(paper.arxivId)!);
+                            logger.warn('agent_error', {
+                                arxiv_id: paper.arxivId,
+                                stage: 'classify',
+                                error_type: paperError instanceof Error ? paperError.name : 'Error',
+                                error: paperError instanceof Error ? paperError.message : String(paperError),
+                            });
+                        }
                     }
                 }
-                return { ...paper, classification };
             }),
         );
+        await Promise.all(batchTasks);
+        if (newClassifications > 0 && newClassifications % PROGRESS_INTERVAL !== 0) {
+            logger.info('classify_progress', {
+                classified: newClassifications,
+                total: pending.length,
+                done: true,
+            });
+        }
+        logger.debug('classify_stage', {
+            batches: batches.length,
+            batch_size: CLASSIFICATION_BATCH_SIZE,
+            new_classifications: newClassifications,
+            elapsed_ms: elapsed(classifyMs),
+        });
 
         const classified = sortPapers(
-            (await Promise.all(tasks)).filter((paper): paper is ClassifiedPaper => paper !== undefined),
+            [...papers.values()]
+                .filter((paper) => results.has(paper.arxivId))
+                .map((paper) => ({ ...paper, classification: results.get(paper.arxivId)! })),
         );
         classified.forEach((paper, index) =>
             store.addRunPaper(runId, paper.arxivId, true, 'included', index, classificationKeys.get(paper.arxivId)),
@@ -471,33 +566,62 @@ export async function retryRun(
             .filter((paper) => failed.has(paper.arxivId));
         let succeeded = 0;
         let failedCount = 0;
-        for (const paper of targets) {
+        // Retry in batches; a failed batch falls back to per-paper retries so
+        // one malformed response does not lose the whole batch.
+        for (const batch of chunk(targets, CLASSIFICATION_BATCH_SIZE)) {
             try {
-                const classification = await classifyPaper(paper, taxonomy, cfg.llm, invoker, logger);
-                const key = classificationCacheKey(paper, cfg, taxonomy.hash);
-                store.saveClassification(
-                    key,
-                    paper,
-                    {
-                        taxonomyHash: taxonomy.hash,
-                        promptVersion: CLASSIFICATION_PROMPT_VERSION,
-                        agentVersion: LLM_CLIENT_VERSION,
-                        provider: cfg.llm.base_url ?? '',
-                        model: cfg.llm.model,
-                    },
-                    classification,
-                );
-                succeeded += 1;
-                logger.info('retry_item', { stage, arxiv_id: paper.arxivId, ok: true });
-            } catch (error) {
-                failedCount += 1;
-                store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.llm.max_retries);
-                logger.warn('retry_item', {
+                const batchResults = await classifyPapers(batch, taxonomy, cfg.llm, invoker, logger);
+                for (const [arxivId, classification] of batchResults) {
+                    const paper = batch.find((entry) => entry.arxivId === arxivId)!;
+                    store.saveClassification(
+                        classificationCacheKey(paper, cfg, taxonomy.hash),
+                        paper,
+                        {
+                            taxonomyHash: taxonomy.hash,
+                            promptVersion: CLASSIFICATION_PROMPT_VERSION,
+                            agentVersion: LLM_CLIENT_VERSION,
+                            provider: cfg.llm.base_url ?? '',
+                            model: cfg.llm.model,
+                        },
+                        classification,
+                    );
+                    succeeded += 1;
+                    logger.info('retry_item', { stage, arxiv_id: arxivId, ok: true });
+                }
+            } catch (batchError) {
+                logger.warn('batch_error', {
                     stage,
-                    arxiv_id: paper.arxivId,
-                    ok: false,
-                    error: error instanceof Error ? error.message : String(error),
+                    batch_size: batch.length,
+                    error: batchError instanceof Error ? batchError.message : String(batchError),
                 });
+                for (const paper of batch) {
+                    try {
+                        const classification = await classifyPapers([paper], taxonomy, cfg.llm, invoker, logger);
+                        store.saveClassification(
+                            classificationCacheKey(paper, cfg, taxonomy.hash),
+                            paper,
+                            {
+                                taxonomyHash: taxonomy.hash,
+                                promptVersion: CLASSIFICATION_PROMPT_VERSION,
+                                agentVersion: LLM_CLIENT_VERSION,
+                                provider: cfg.llm.base_url ?? '',
+                                model: cfg.llm.model,
+                            },
+                            classification.get(paper.arxivId)!,
+                        );
+                        succeeded += 1;
+                        logger.info('retry_item', { stage, arxiv_id: paper.arxivId, ok: true });
+                    } catch (error) {
+                        failedCount += 1;
+                        store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.llm.max_retries);
+                        logger.warn('retry_item', {
+                            stage,
+                            arxiv_id: paper.arxivId,
+                            ok: false,
+                            error: error instanceof Error ? error.message : String(error),
+                        });
+                    }
+                }
             }
         }
         const status = failedCount ? 'error' : 'ok';

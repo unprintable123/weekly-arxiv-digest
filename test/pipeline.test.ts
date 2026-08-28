@@ -43,19 +43,25 @@ async function loadRootConfig(root: string): Promise<Config> {
 function setupInvoker(overrides: { attention?: string[]; moe?: string[] } = {}) {
     return {
         complete: vi.fn(async (prompt: string) => {
+            const entries: { id: string; categories: string[]; tags: string[] }[] = [];
             if (prompt.includes('Attention Is All You Need')) {
-                return JSON.stringify({
+                entries.push({
+                    id: '2401.01234',
                     categories: overrides.attention ?? ['llm-architecture', 'llm-physics'],
                     tags: ['attention', 'linear-attention'],
                 });
             }
             if (prompt.includes('Mixture of Experts')) {
-                return JSON.stringify({
+                entries.push({
+                    id: '2401.01235',
                     categories: overrides.moe ?? ['llm-architecture'],
                     tags: ['mixture-of-experts'],
                 });
             }
-            return JSON.stringify({ categories: ['other'], tags: [] });
+            if (!entries.length) {
+                entries.push({ id: 'unknown-paper', categories: ['other'], tags: [] });
+            }
+            return JSON.stringify(entries);
         }),
     };
 }
@@ -250,7 +256,7 @@ describe('runDigest', () => {
             expect(starts).toHaveLength(invoker.complete.mock.calls.length);
             expect(starts.length).toBeGreaterThan(0);
             for (const start of starts) {
-                expect(start.arxiv_id).toBeTruthy();
+                expect(start.batch_size).toBeGreaterThan(0);
                 expect(start.attempt).toBe(1);
                 expect(start.model).toBe('test-model');
             }
@@ -269,41 +275,122 @@ describe('runDigest', () => {
             let failMoe = true;
             const invoker = {
                 complete: vi.fn(async (prompt: string) => {
-                    if (prompt.includes('Mixture of Experts') && failMoe) {
+                    const wantsAttention = prompt.includes('Attention Is All You Need');
+                    const wantsMoe = prompt.includes('Mixture of Experts');
+                    if (wantsMoe && failMoe) {
                         failMoe = false;
                         throw new Error('classify boom');
                     }
-                    if (prompt.includes('Mixture of Experts')) {
-                        return JSON.stringify({ categories: ['llm-architecture'], tags: [] });
+                    const entries: { id: string; categories: string[]; tags: string[] }[] = [];
+                    if (wantsAttention) {
+                        entries.push({ id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] });
                     }
-                    return JSON.stringify({ categories: ['llm-architecture'], tags: ['attention'] });
+                    if (wantsMoe) {
+                        entries.push({ id: '2401.01235', categories: ['llm-architecture'], tags: [] });
+                    }
+                    return JSON.stringify(entries);
                 }),
             };
             stubCrawl();
 
             const first = await runDigest(cfg, window(), { root, invoker });
-            expect(first.errors).toBe(1);
-            expect(first.status).toBe('error');
-            // The other paper is still classified and written.
-            expect(first.documents[0].papers.map((paper) => paper.arxivId)).toEqual(['2401.01234']);
+            // Both papers share one batch; the batch failure falls back to
+            // per-paper classification, so both papers still succeed and the
+            // run reports no error.
+            expect(first.errors).toBe(0);
+            expect(first.status).toBe('ok');
+            expect(first.documents[0].papers.map((paper) => paper.arxivId)).toEqual([
+                '2401.01235',
+                '2401.01234',
+            ]);
 
-            // The retry only re-classifies the single failed paper.
+            // A forced rerun re-classifies both papers; the batch call now
+            // succeeds, so no per-paper fallback is needed.
             const callsBefore = invoker.complete.mock.calls.length;
-            const retry = await retryRun(cfg, first.runId, 'classify', { root, invoker });
-            expect(retry.retried).toBe(1);
-            expect(retry.succeeded).toBe(1);
-            expect(retry.failed).toBe(0);
-            expect(retry.status).toBe('ok');
-            expect(invoker.complete.mock.calls.length).toBe(callsBefore + 1);
-
-            // A subsequent run now includes the repaired paper from cache.
-            const rerun = await runDigest(cfg, window(), { root, invoker });
+            const rerun = await runDigest(cfg, window(), { root, invoker, force: true });
             expect(rerun.errors).toBe(0);
             expect(rerun.status).toBe('ok');
             expect(rerun.documents[0].papers.map((paper) => paper.arxivId)).toEqual([
                 '2401.01235',
                 '2401.01234',
             ]);
+            expect(invoker.complete.mock.calls.length).toBe(callsBefore + 1);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('falls back to per-paper classification when a batch response is malformed', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            let failBatch = true;
+            const invoker = {
+                complete: vi.fn(async (prompt: string) => {
+                    if (failBatch) {
+                        failBatch = false;
+                        // Valid JSON but wrong shape: not a per-paper array.
+                        return '{"categories": ["llm-architecture"], "tags": []}';
+                    }
+                    if (prompt.includes('Mixture of Experts')) {
+                        return JSON.stringify([{ id: '2401.01235', categories: ['llm-architecture'], tags: [] }]);
+                    }
+                    return JSON.stringify([{ id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] }]);
+                }),
+            };
+            stubCrawl();
+
+            const result = await runDigest(cfg, window(), { root, invoker });
+            expect(result.errors).toBe(0);
+            expect(result.status).toBe('ok');
+            expect(result.documents[0].papers.map((paper) => paper.arxivId)).toEqual([
+                '2401.01235',
+                '2401.01234',
+            ]);
+            // One failed batch call + one per-paper call per paper.
+            expect(invoker.complete.mock.calls.length).toBe(3);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('records an agent error when per-paper classification also fails', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            let failMoe = true;
+            const invoker = {
+                complete: vi.fn(async (prompt: string) => {
+                    if (prompt.includes('Mixture of Experts') && failMoe) {
+                        throw new Error('moe classify boom');
+                    }
+                    const entries: { id: string; categories: string[]; tags: string[] }[] = [];
+                    if (prompt.includes('Attention Is All You Need')) {
+                        entries.push({ id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] });
+                    }
+                    if (prompt.includes('Mixture of Experts')) {
+                        entries.push({ id: '2401.01235', categories: ['llm-architecture'], tags: [] });
+                    }
+                    return JSON.stringify(entries);
+                }),
+            };
+            stubCrawl();
+
+            const result = await runDigest(cfg, window(), { root, invoker });
+            expect(result.errors).toBe(1);
+            expect(result.status).toBe('error');
+            // The other paper is still classified and written.
+            expect(result.documents[0].papers.map((paper) => paper.arxivId)).toEqual(['2401.01234']);
+
+            // The retry only re-classifies the single failed paper.
+            failMoe = false;
+            const callsBefore = invoker.complete.mock.calls.length;
+            const retry = await retryRun(cfg, result.runId, 'classify', { root, invoker });
+            expect(retry.retried).toBe(1);
+            expect(retry.succeeded).toBe(1);
+            expect(retry.failed).toBe(0);
+            expect(retry.status).toBe('ok');
+            expect(invoker.complete.mock.calls.length).toBe(callsBefore + 1);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
