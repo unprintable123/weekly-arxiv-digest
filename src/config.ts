@@ -4,6 +4,20 @@ import { z } from 'zod';
 import type { InterestCategory } from './types.js';
 import { slug } from './util.js';
 
+const timezoneSchema = z
+  .string()
+  .refine(
+    (value) => {
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: value });
+        return true;
+      } catch {
+        return value === 'UTC';
+      }
+    },
+    { message: 'invalid IANA timezone' },
+  );
+
 const schema = z.object({
   topic: z.string().optional(),
   categories: z.array(z.string()).optional(),
@@ -18,6 +32,8 @@ const schema = z.object({
       request_delay_ms: z.number().int().nonnegative().default(400),
       timeout_ms: z.number().int().positive().default(20000),
       user_agent: z.string().default('weekly-digest/0.1'),
+      max_papers: z.number().int().positive().optional(),
+      concurrency: z.number().int().positive().default(4),
     })
     .default({
       provider: 'papers.cool',
@@ -26,11 +42,12 @@ const schema = z.object({
       request_delay_ms: 400,
       timeout_ms: 20000,
       user_agent: 'weekly-digest/0.1',
+      concurrency: 4,
     }),
   window: z
     .object({
-      timezone: z.string().default('UTC'),
-      default: z.string().default('last-complete-week'),
+      timezone: timezoneSchema.default('UTC'),
+      default: z.enum(['last-complete-week', 'current-week']).default('last-complete-week'),
     })
     .default({
       timezone: 'UTC',

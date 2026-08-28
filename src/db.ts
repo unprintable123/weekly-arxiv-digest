@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import initSqlJs from 'sql.js';
@@ -11,10 +11,28 @@ const sqlJs: any = await initSqlJs({
 
 type SqliteDatabase = any;
 
+/** Convert a `papers` table row into the domain `Paper` object. */
+export function rowToPaper(row: any): Paper {
+  return {
+    arxivId: row.arxiv_id,
+    version: row.version || undefined,
+    title: row.title,
+    authors: JSON.parse(row.authors_json || '[]'),
+    categories: JSON.parse(row.categories_json || '[]'),
+    abstractEn: row.abstract_en,
+    publishedAt: row.published_at,
+    updatedAt: row.updated_at || undefined,
+    detailUrl: row.detail_url,
+    sourceUrl: row.source_url,
+    contentHash: row.content_hash,
+  };
+}
+
 class Statement {
   constructor(
     private readonly database: SqliteDatabase,
     private readonly sql: string,
+    private readonly onWrite?: () => void,
   ) { }
 
   private bind(statement: any, params: unknown[]): void {
@@ -47,29 +65,35 @@ class Statement {
     this.bind(statement, params);
     statement.step();
     statement.free();
+    this.onWrite?.();
     return { changes: this.database.getRowsModified() };
   }
 }
 
 class SqliteStore {
+  private inTransaction = false;
+
   constructor(
     readonly database: SqliteDatabase,
     private readonly file: string,
   ) { }
 
   prepare(sql: string): Statement {
-    return new Statement(this.database, sql);
+    // Every write is flushed to disk atomically so an interrupted process
+    // never loses cache/run state and never leaves a corrupt database file.
+    return new Statement(this.database, sql, () => this.persistIfIdle());
   }
 
   exec(sql: string): void {
     this.database.exec(sql);
-    this.persist();
+    this.persistIfIdle();
   }
 
   pragma(_value: string): void { }
 
   transaction<T>(callback: () => T): () => T {
     return () => {
+      this.inTransaction = true;
       this.database.exec('BEGIN');
       try {
         const result = callback();
@@ -79,12 +103,22 @@ class SqliteStore {
       } catch (error) {
         this.database.exec('ROLLBACK');
         throw error;
+      } finally {
+        this.inTransaction = false;
       }
     };
   }
 
+  private persistIfIdle(): void {
+    if (!this.inTransaction) this.persist();
+  }
+
+  /** Write a snapshot to a temp file then atomically rename over the target. */
   persist(): void {
-    writeFileSync(this.file, Buffer.from(this.database.export()));
+    const buffer = Buffer.from(this.database.export());
+    const temporary = `${this.file}.tmp-${process.pid}`;
+    writeFileSync(temporary, buffer);
+    renameSync(temporary, this.file);
   }
 
   close(): void {
@@ -176,6 +210,24 @@ CREATE TABLE IF NOT EXISTS llm_errors (
   message TEXT,
   created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS crawl_errors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT,
+  stage TEXT,
+  category TEXT,
+  arxiv_id TEXT,
+  url TEXT,
+  message TEXT,
+  created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS run_documents (
+  run_id TEXT PRIMARY KEY,
+  week TEXT,
+  document_json TEXT,
+  markdown TEXT,
+  file TEXT,
+  created_at TEXT
+);
 `;
 
 export class Store {
@@ -233,19 +285,7 @@ export class Store {
   }
 
   private rowPaper(row: any): Paper {
-    return {
-      arxivId: row.arxiv_id,
-      version: row.version || undefined,
-      title: row.title,
-      authors: JSON.parse(row.authors_json || '[]'),
-      categories: JSON.parse(row.categories_json || '[]'),
-      abstractEn: row.abstract_en,
-      publishedAt: row.published_at,
-      updatedAt: row.updated_at || undefined,
-      detailUrl: row.detail_url,
-      sourceUrl: row.source_url,
-      contentHash: row.content_hash,
-    };
+    return rowToPaper(row);
   }
 
   getFetch(url: string): any {
@@ -367,10 +407,10 @@ export class Store {
       .run(run.runId, run.week, run.from, run.to, run.configHash, run.startedAt, '', 'running', '{}');
   }
 
-  finishRun(id: string, status: string, stats: any): void {
+  finishRun(id: string, status: string, stats: any, endedAt = new Date().toISOString()): void {
     this.db
       .prepare('UPDATE runs SET ended_at=?,status=?,stats_json=? WHERE run_id=?')
-      .run(new Date().toISOString(), status, JSON.stringify(stats), id);
+      .run(endedAt, status, JSON.stringify(stats), id);
   }
 
   addRunPaper(runId: string, id: string, included: boolean, reason: string, order: number): void {
@@ -417,5 +457,65 @@ export class Store {
       return deleted;
     });
     return transaction();
+  }
+
+  addCrawlError(runId: string, error: { stage: string; category?: string; arxivId?: string; url: string; message: string }): void {
+    this.db
+      .prepare(
+        'INSERT INTO crawl_errors (run_id, stage, category, arxiv_id, url, message, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run(
+        runId,
+        error.stage,
+        error.category ?? '',
+        error.arxivId ?? '',
+        error.url,
+        error.message,
+        new Date().toISOString(),
+      );
+  }
+
+  crawlErrorsForRun(runId: string): any[] {
+    return this.db
+      .prepare('SELECT * FROM crawl_errors WHERE run_id=? ORDER BY id')
+      .all(runId) as any[];
+  }
+
+  getRun(runId: string): any {
+    return this.db.prepare('SELECT * FROM runs WHERE run_id=?').get(runId) as any;
+  }
+
+  /** Latest run for a week/config-hash combination (any status). */
+  latestRunForWeek(week: string, configHash: string): any {
+    return this.db
+      .prepare(
+        'SELECT * FROM runs WHERE week=? AND config_hash=? ORDER BY ended_at DESC LIMIT 1',
+      )
+      .get(week, configHash) as any;
+  }
+
+  llmErrorsForRun(runId: string, stage?: string): any[] {
+    const sql = stage
+      ? 'SELECT * FROM llm_errors WHERE run_id=? AND stage=? ORDER BY id'
+      : 'SELECT * FROM llm_errors WHERE run_id=? ORDER BY id';
+    return this.db.prepare(sql).all(runId, stage) as any[];
+  }
+
+  papersForRun(runId: string): any[] {
+    return this.db
+      .prepare(
+        'SELECT p.*, rp.included, rp.reason, rp.sort_order FROM run_papers rp JOIN papers p ON p.arxiv_id=rp.arxiv_id WHERE rp.run_id=? ORDER BY rp.sort_order',
+      )
+      .all(runId) as any[];
+  }
+
+  saveRunDocument(runId: string, week: string, document: unknown, markdown: string, file: string): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO run_documents VALUES (?,?,?,?,?,?)')
+      .run(runId, week, JSON.stringify(document), markdown, file, new Date().toISOString());
+  }
+
+  getRunDocument(runId: string): any {
+    return this.db.prepare('SELECT * FROM run_documents WHERE run_id=?').get(runId) as any;
   }
 }

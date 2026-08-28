@@ -27,7 +27,7 @@
 - `yaml` 解析配置，`zod` 校验配置和 LLM JSON，`cheerio` 解析 papers.cool HTML，`p-limit` 控制并发，`date-fns`/原生 UTC 日期函数计算 ISO 周。
 - SQLite（使用无需本机编译的 `sql.js` WASM 实现）作为单文件缓存和运行记录；不依赖外部服务。
 - Markdown 使用模板渲染（例如 `handlebars` 或小型纯函数），避免把未经转义的标题当成 Markdown 标记。
-- pi agent 使用 `@mariozechner/pi-agent-core`，模型/API 抽象使用 `@mariozechner/pi-ai`；两者通过 `pnpm add` 声明在 `dependencies` 中并由 TypeScript 直接 import，测试替身放在 `devDependencies` 中。生产代码不依赖 `@mariozechner/pi-coding-agent` CLI。
+- pi agent
 
 应用不调用全局 `pi` 可执行文件，不使用 `npx` 临时下载，也不通过子进程启动 agent。`PiAgentAdapter` 直接使用本地 pi agent TypeScript API 创建会话、发送提示词并读取结果；具体包版本由 lockfile 固定。适配器要求 agent 返回单个 JSON，并用 zod 校验，不能凭自由文本猜测字段。模型服务所需的密钥从环境变量读取，不进入 YAML、源码或日志。
 
@@ -37,21 +37,21 @@
 
 ```yaml
 source:
-  base_url: "https://papers.cool"
-  categories: ["cs.LG", "cs.CL", "cs.AI"]
+  base_url: 'https://papers.cool'
+  categories: ['cs.LG', 'cs.CL', 'cs.AI']
   request_delay_ms: 400
   timeout_ms: 20000
-  user_agent: "weekly-digest/0.1"
+  user_agent: 'weekly-digest/0.1'
 window:
-  timezone: "UTC"
-  default: "last-complete-week"
+  timezone: 'UTC'
+  default: 'last-complete-week'
 output:
-  directory: "digests"
-  filename: "weekly-{week}.md"
-  language: "zh-CN"
+  directory: 'digests'
+  filename: 'weekly-{week}.md'
+  language: 'zh-CN'
 pi_agent:
-  provider: "anthropic"
-  model: "configured-model-id"
+  provider: 'anthropic'
+  model: 'configured-model-id'
   timeout_ms: 120000
   max_retries: 2
 ```
@@ -138,9 +138,11 @@ SQLite 文件默认放在 `.cache/weekly-digest.sqlite`，数据库目录和 dig
 - **Published:** 2026-08-20
 
 ### Abstract (English)
+
 原始英文摘要
 
 ### 摘要（中文）
+
 缓存的中文翻译
 ```
 

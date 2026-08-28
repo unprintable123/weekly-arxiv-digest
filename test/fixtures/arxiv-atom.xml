@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title>ArXiv Query Results</title>
+  <entry>
+    <id>http://arxiv.org/abs/2401.01234v1</id>
+    <updated>2024-01-01T10:00:00Z</updated>
+    <published>2024-01-01T00:00:00Z</published>
+    <title>Atom Entry Title for Attention</title>
+    <summary>This is the abstract from the arXiv Atom export API.</summary>
+    <author><name>Alice Example</name></author>
+    <author><name>Bob Sample</name></author>
+    <category term="cs.LG"/>
+    <category term="cs.AI"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2401.09999v2</id>
+    <updated>2024-01-03T08:00:00Z</updated>
+    <published>2024-01-02T00:00:00Z</published>
+    <title>Second Atom Entry</title>
+    <summary>Another abstract from the Atom API.</summary>
+    <author><name>Carol Test</name></author>
+    <category term="cs.CL"/>
+  </entry>
+</feed>

@@ -1,7 +1,16 @@
 import type { DigestDocument, Renderer } from './types.js';
 
 const md = (s: string): string =>
-    s.replace(/[\\`*_[\]{}<>#+.!|]/g, (match) => '\\' + match).replace(/\r?\n/g, '\n');
+    s
+        // Escape characters that carry Markdown meaning anywhere in a line.
+        // Backslash-escaping renders the literal character, so display is
+        // preserved while line-start structures (lists, headings, blockquotes,
+        // strikethrough) can no longer alter the document layout.
+        .replace(/[\\`*_[\]{}<>#+.!|~-]/g, (match) => '\\' + match)
+        // Normalize line endings and collapse runaway blank lines from
+        // multi-line agent output so it cannot inject extra paragraphs.
+        .replace(/\r\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n');
 
 const link = (url: string): string =>
     /^https:\/\/(?:arxiv\.org|www\.arxiv\.org)\//.test(url) ? url : '#';

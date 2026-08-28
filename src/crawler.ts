@@ -1,12 +1,29 @@
 import * as cheerio from 'cheerio';
+import pLimit from 'p-limit';
 import type { Paper } from './types.js';
 import { hash, sleep } from './util.js';
 import type { Store } from './db.js';
 
 export type SourceProvider = 'papers.cool' | 'arxiv';
+export type CrawlStage = 'list' | 'detail' | 'fallback';
+
+export interface CrawlError {
+  stage: CrawlStage;
+  category?: string;
+  arxivId?: string;
+  url: string;
+  message: string;
+}
+
+export interface CrawlResult {
+  papers: Paper[];
+  errors: CrawlError[];
+  /** true when at least one HTTP request actually went to the network */
+  newFetches: boolean;
+}
 
 export interface PaperCrawler {
-  fetchCategory(category: string, from: Date, to: Date): Promise<Paper[]>;
+  fetchCategory(category: string, from: Date, to: Date): Promise<CrawlResult>;
 }
 
 export interface CrawlerOptions {
@@ -18,15 +35,24 @@ export interface CrawlerOptions {
   retries?: number;
   pageSize?: number;
   force?: boolean;
+  /** max papers to keep after list dedup (0/undefined = unlimited) */
+  maxPapers?: number;
+  /** max concurrent detail/fallback requests */
+  concurrency?: number;
 }
 
 type FetchOptions = { accept: string };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETRIES = 3;
 const DEFAULT_PAGE_SIZE = 100;
+const DEFAULT_CONCURRENCY = 4;
 
 function trimText(value: string | undefined | null): string {
   return (value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function baseUrl(value: string): string {
@@ -91,10 +117,17 @@ function chooseLatest(previous: Paper | undefined, candidate: Paper): Paper {
 
 /** Shared HTTP/cache behavior. It never constructs or requests PDF URLs. */
 class HttpClient {
+  private networkFetches = 0;
+  private cacheHits = 0;
+
   constructor(
     private readonly store: Store,
     private readonly opts: CrawlerOptions,
   ) { }
+
+  get stats(): { networkFetches: number; cacheHits: number } {
+    return { networkFetches: this.networkFetches, cacheHits: this.cacheHits };
+  }
 
   async text(url: string, options: FetchOptions): Promise<string> {
     const cached = this.store.getFetch(url) as any;
@@ -106,6 +139,7 @@ class HttpClient {
       typeof cached.body === 'string' &&
       cached.body.length > 0
     ) {
+      this.cacheHits += 1;
       return cached.body;
     }
 
@@ -122,6 +156,7 @@ class HttpClient {
         };
         if (cached?.etag) headers['If-None-Match'] = cached.etag;
         if (cached?.last_modified) headers['If-Modified-Since'] = cached.last_modified;
+        this.networkFetches += 1;
         const response = await fetch(url, { signal: controller.signal, headers });
         if (response.status === 304 && cached?.body) {
           this.store.saveFetch(url, {
@@ -170,8 +205,10 @@ export class PapersCoolCrawler implements PaperCrawler {
     this.http = new HttpClient(store, this.opts);
   }
 
-  async fetchCategory(category: string, from: Date, to: Date): Promise<Paper[]> {
+  async fetchCategory(category: string, from: Date, to: Date): Promise<CrawlResult> {
     const found = new Map<string, Paper>();
+    const errors: CrawlError[] = [];
+    const startFetches = this.http.stats.networkFetches;
     // papers.cool's category endpoint is a daily page, so a weekly window
     // requires one request sequence for every day in the half-open interval.
     for (
@@ -187,7 +224,13 @@ export class PapersCoolCrawler implements PaperCrawler {
         let html: string;
         try {
           html = await this.http.text(url.toString(), { accept: 'text/html,application/xhtml+xml' });
-        } catch {
+        } catch (error) {
+          errors.push({
+            stage: 'list',
+            category,
+            url: url.toString(),
+            message: errorMessage(error),
+          });
           break;
         }
         const $ = cheerio.load(html);
@@ -202,23 +245,59 @@ export class PapersCoolCrawler implements PaperCrawler {
       }
     }
 
-    const detailed = new Map<string, Paper>();
-    for (const paper of found.values()) {
-      let merged = paper;
-      const detailUrl = this.detailPageUrl(paper.arxivId, paper.version);
-      try {
-        const html = await this.http.text(detailUrl, { accept: 'text/html,application/xhtml+xml' });
-        merged = mergePaper(paper, this.parseDetail(html, detailUrl));
-      } catch {
-        // Keep list metadata. A missing abstract is handled by the fallback.
-      }
-      if (!merged.abstractEn) {
-        const fallback = await this.fetchArxivFallback(merged);
-        if (fallback) merged = mergePaper(merged, fallback);
-      }
-      if (withinWindow(merged.publishedAt, from, to)) detailed.set(merged.arxivId, merged);
+    let candidates = [...found.values()];
+    if (this.opts.maxPapers && candidates.length > this.opts.maxPapers) {
+      candidates = candidates.sort((a, b) => a.arxivId.localeCompare(b.arxivId)).slice(0, this.opts.maxPapers);
+      errors.push({
+        stage: 'list',
+        category,
+        url: `${this.opts.baseUrl}/arxiv/${category}`,
+        message: `candidate cap reached (max_papers=${this.opts.maxPapers})`,
+      });
     }
-    return [...detailed.values()].sort((a, b) => a.arxivId.localeCompare(b.arxivId));
+
+    const detailed = new Map<string, Paper>();
+    const limit = pLimit(this.opts.concurrency ?? DEFAULT_CONCURRENCY);
+    const tasks = candidates.map((paper) =>
+      limit(async () => {
+        let merged = paper;
+        const detailUrl = this.detailPageUrl(paper.arxivId, paper.version);
+        try {
+          const html = await this.http.text(detailUrl, { accept: 'text/html,application/xhtml+xml' });
+          merged = mergePaper(paper, this.parseDetail(html, detailUrl));
+        } catch (error) {
+          errors.push({
+            stage: 'detail',
+            category,
+            arxivId: paper.arxivId,
+            url: detailUrl,
+            message: errorMessage(error),
+          });
+        }
+        if (!merged.abstractEn) {
+          const fallback = await this.fetchArxivFallback(merged, category, errors);
+          if (fallback) merged = mergePaper(merged, fallback);
+        }
+        if (!merged.abstractEn) {
+          errors.push({
+            stage: 'detail',
+            category,
+            arxivId: paper.arxivId,
+            url: detailUrl,
+            message: 'missing abstract after detail page and arXiv fallback',
+          });
+          return;
+        }
+        if (withinWindow(merged.publishedAt, from, to)) detailed.set(merged.arxivId, merged);
+      }),
+    );
+    await Promise.all(tasks);
+
+    return {
+      papers: [...detailed.values()].sort((a, b) => a.arxivId.localeCompare(b.arxivId)),
+      errors,
+      newFetches: this.http.stats.networkFetches > startFetches,
+    };
   }
 
   private detailPageUrl(id: string, version?: string): string {
@@ -301,7 +380,11 @@ export class PapersCoolCrawler implements PaperCrawler {
     };
   }
 
-  private async fetchArxivFallback(base: Paper): Promise<Partial<Paper> | undefined> {
+  private async fetchArxivFallback(
+    base: Paper,
+    category: string,
+    errors: CrawlError[],
+  ): Promise<Partial<Paper> | undefined> {
     const fallbackBase = baseUrl(this.opts.arxivBaseUrl ?? 'https://arxiv.org');
     const url = `${fallbackBase}/abs/${base.arxivId}${base.version ?? ''}`;
     try {
@@ -310,8 +393,25 @@ export class PapersCoolCrawler implements PaperCrawler {
       const abstractEn = trimText(
         $('blockquote.abstract').first().text().replace(/^Abstract:\s*/i, ''),
       );
-      return abstractEn ? { abstractEn, detailUrl: url } : undefined;
-    } catch {
+      if (!abstractEn) {
+        errors.push({
+          stage: 'fallback',
+          category,
+          arxivId: base.arxivId,
+          url,
+          message: 'arXiv fallback returned no abstract',
+        });
+        return undefined;
+      }
+      return { abstractEn, detailUrl: url };
+    } catch (error) {
+      errors.push({
+        stage: 'fallback',
+        category,
+        arxivId: base.arxivId,
+        url,
+        message: errorMessage(error),
+      });
       return undefined;
     }
   }
@@ -330,8 +430,10 @@ export class ArxivCrawler implements PaperCrawler {
     this.http = new HttpClient(store, this.opts);
   }
 
-  async fetchCategory(category: string, from: Date, to: Date): Promise<Paper[]> {
+  async fetchCategory(category: string, from: Date, to: Date): Promise<CrawlResult> {
     const found = new Map<string, Paper>();
+    const errors: CrawlError[] = [];
+    const startFetches = this.http.stats.networkFetches;
     const startDate = dateOnly(from).replace(/-/g, '');
     const endDate = dateOnly(new Date(to.getTime() - 1)).replace(/-/g, '');
     const pageSize = this.opts.pageSize ?? DEFAULT_PAGE_SIZE;
@@ -346,7 +448,13 @@ export class ArxivCrawler implements PaperCrawler {
       let xml: string;
       try {
         xml = await this.http.text(url.toString(), { accept: 'application/atom+xml, application/xml' });
-      } catch {
+      } catch (error) {
+        errors.push({
+          stage: 'list',
+          category,
+          url: url.toString(),
+          message: errorMessage(error),
+        });
         break;
       }
       const $ = cheerio.load(xml, { xmlMode: true });
@@ -359,7 +467,23 @@ export class ArxivCrawler implements PaperCrawler {
       }
       if (entries.length < pageSize) break;
     }
-    return [...found.values()].sort((a, b) => a.arxivId.localeCompare(b.arxivId));
+
+    let papers = [...found.values()];
+    if (this.opts.maxPapers && papers.length > this.opts.maxPapers) {
+      papers = papers.sort((a, b) => a.arxivId.localeCompare(b.arxivId)).slice(0, this.opts.maxPapers);
+      errors.push({
+        stage: 'list',
+        category,
+        url: `${this.opts.baseUrl}/api/query`,
+        message: `candidate cap reached (max_papers=${this.opts.maxPapers})`,
+      });
+    }
+
+    return {
+      papers: papers.sort((a, b) => a.arxivId.localeCompare(b.arxivId)),
+      errors,
+      newFetches: this.http.stats.networkFetches > startFetches,
+    };
   }
 
   private parseEntry($: cheerio.CheerioAPI, element: any, sourceUrl: string): Paper | undefined {
@@ -430,10 +554,21 @@ function mergePaper(base: Paper, patch: Partial<Paper>): Paper {
   });
 }
 
+export interface CreateCrawlerOptions {
+  baseUrl: string;
+  arxivBaseUrl: string;
+  delay: number;
+  timeout: number;
+  userAgent: string;
+  force?: boolean;
+  maxPapers?: number;
+  concurrency?: number;
+}
+
 export function createCrawler(
   provider: SourceProvider,
   store: Store,
-  opts: { baseUrl: string; arxivBaseUrl: string; delay: number; timeout: number; userAgent: string; force?: boolean },
+  opts: CreateCrawlerOptions,
 ): PaperCrawler {
   if (provider === 'papers.cool') {
     return new PapersCoolCrawler(store, {
@@ -443,6 +578,8 @@ export function createCrawler(
       timeout: opts.timeout,
       userAgent: opts.userAgent,
       force: opts.force,
+      maxPapers: opts.maxPapers,
+      concurrency: opts.concurrency,
     });
   }
   if (provider === 'arxiv') {
@@ -452,6 +589,8 @@ export function createCrawler(
       timeout: opts.timeout,
       userAgent: opts.userAgent,
       force: opts.force,
+      maxPapers: opts.maxPapers,
+      concurrency: opts.concurrency,
     });
   }
   throw new Error(`Unsupported source provider: ${String(provider)}`);

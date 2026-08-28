@@ -1,6 +1,9 @@
+import { createRequire } from 'node:module';
 import { z } from 'zod';
 import type { InterestCategory, Paper, RelevanceResult } from './types.js';
 import { sleep } from './util.js';
+
+const require = createRequire(import.meta.url);
 
 const resultSchema = z.object({
   score: z.number().int().min(1).max(10),
@@ -16,14 +19,31 @@ export interface PiInvoker {
   ): Promise<string>;
 }
 
+/** Version of the local pi agent packages, used for cache invalidation. */
+export function agentVersion(): string {
+  try {
+    const pkg = require('@earendil-works/pi-coding-agent/package.json') as { version?: string };
+    return pkg.version ?? 'local';
+  } catch {
+    return 'local';
+  }
+}
+
+/**
+ * Adapter that drives the local pi agent through its TypeScript API. It creates
+ * a stateful `Agent` session via `@earendil-works/pi-agent-core`, sends the
+ * prompt, and reads back the final assistant text. No global `pi` executable,
+ * `npx` download, or child process is ever used.
+ */
 export class PiAgentAdapter implements PiInvoker {
   async complete(
     prompt: string,
     opts: { provider: string; model: string; timeoutMs: number },
   ): Promise<string> {
     // The packages are intentionally loaded from local node_modules; no CLI or child process fallback.
-    const { contentText } = await import('@earendil-works/pi-ai');
+    const { Agent } = await import('@earendil-works/pi-agent-core');
     const { builtinModels } = await import('@earendil-works/pi-ai/providers/all');
+    const { contentText } = await import('@earendil-works/pi-ai');
 
     const models = builtinModels();
     const model = models.getModel(opts.provider, opts.model);
@@ -31,15 +51,36 @@ export class PiAgentAdapter implements PiInvoker {
       throw new Error(`Model not found for provider "${opts.provider}" and model "${opts.model}"`);
     }
 
-    const message = await Promise.race([
-      models.completeSimple(model, {
-        messages: [{ role: 'user', content: prompt, timestamp: Date.now() }],
-      }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('pi agent timeout')), opts.timeoutMs),
-      ),
-    ]);
-    return contentText(message.content);
+    // Create an agent session: streamFn routes model requests to the local
+    // pi-ai runtime, convertToLlm passes standard LLM messages through.
+    const agent = new Agent({
+      streamFn: (m, context, options) => models.streamSimple(m, context, options),
+      convertToLlm: (messages) =>
+        messages.filter(
+          (message) =>
+            message.role === 'user' || message.role === 'assistant' || message.role === 'toolResult',
+        ) as never,
+      initialState: { model, thinkingLevel: 'off', systemPrompt: '' },
+    });
+
+    try {
+      await Promise.race([
+        agent.prompt(prompt).then(() => agent.waitForIdle()),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => {
+            agent.abort();
+            reject(new Error('pi agent timeout'));
+          }, opts.timeoutMs),
+        ),
+      ]);
+    } finally {
+      agent.abort();
+    }
+
+    const lastAssistant = [...agent.state.messages]
+      .reverse()
+      .find((message) => message.role === 'assistant');
+    return contentText(lastAssistant?.content ?? []);
   }
 }
 
@@ -85,8 +126,13 @@ Use keys score, reason, categories, tags. Do not invent facts.`;
   throw last;
 }
 
-export async function translateAbstract(paper: Paper, cfg: any, inv: PiInvoker): Promise<string> {
-  const prompt = `Translate the following English abstract to Simplified Chinese. Return only the translation, preserving technical meaning and without adding facts.
+export async function translateAbstract(
+  paper: Paper,
+  cfg: any,
+  inv: PiInvoker,
+  language = 'zh-CN',
+): Promise<string> {
+  const prompt = `Translate the following English abstract into ${language}. Return only the translation, preserving technical meaning and without adding facts.
 ${paper.abstractEn}`;
   let last: unknown;
   for (let attempt = 0; attempt <= cfg.max_retries; attempt += 1) {
