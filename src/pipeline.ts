@@ -256,12 +256,7 @@ export async function runDigest(
                         store.saveClassification(
                             classificationKeys.get(arxivId)!,
                             paper,
-                            {
-                                promptVersion: CLASSIFICATION_PROMPT_VERSION,
-                                agentVersion: LLM_CLIENT_VERSION,
-                                provider: cfg.llm.base_url ?? '',
-                                model: cfg.llm.model,
-                            },
+                            cfg.llm.model,
                             classification,
                         );
                         checkpoint();
@@ -295,12 +290,7 @@ export async function runDigest(
                             store.saveClassification(
                                 classificationKeys.get(paper.arxivId)!,
                                 paper,
-                                {
-                                    promptVersion: CLASSIFICATION_PROMPT_VERSION,
-                                    agentVersion: LLM_CLIENT_VERSION,
-                                    provider: cfg.llm.base_url ?? '',
-                                    model: cfg.llm.model,
-                                },
+                                cfg.llm.model,
                                 classificationResult,
                             );
                             checkpoint();

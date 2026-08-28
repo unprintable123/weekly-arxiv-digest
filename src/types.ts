@@ -17,7 +17,6 @@ export type ClassificationResult = {
   categories: string[];
   /** Lowercase kebab-case tags, at most `max_tags`; may be empty. */
   tags: string[];
-  raw?: string;
 };
 
 export type ClassifiedPaper = Paper & {

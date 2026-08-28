@@ -44,7 +44,7 @@ export interface CrawlerOptions {
   logger?: Logger;
 }
 
-type FetchOptions = { accept: string };
+type ParseOptions = { accept: string };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETRIES = 3;
 const DEFAULT_PAGE_SIZE = 500;
@@ -129,6 +129,13 @@ function chooseLatest(previous: Paper | undefined, candidate: Paper): Paper {
 }
 
 /** Shared HTTP/cache behavior. It never constructs or requests PDF URLs. */
+interface CachedFetch {
+  papers: unknown;
+  etag: string;
+  lastModified: string;
+  expiresAt: string;
+}
+
 class HttpClient {
   private networkFetches = 0;
   private cacheHits = 0;
@@ -143,24 +150,26 @@ class HttpClient {
     return { networkFetches: this.networkFetches, cacheHits: this.cacheHits };
   }
 
-  async text(url: string, options: FetchOptions): Promise<string> {
+  /**
+   * Fetch a list URL and return its extracted paper entries. The cache stores
+   * the extracted, normalized papers — never the raw HTML/XML body — so a hit
+   * skips both the network round-trip and the parsing work.
+   */
+  async papers(url: string, options: ParseOptions, parse: (body: string) => unknown): Promise<unknown[]> {
     const requestStarted = Date.now();
-    const cached = this.store.getFetch(url) as any;
-    const cacheValid = cached?.expires_at && new Date(cached.expires_at).getTime() > Date.now();
-    if (
-      !this.opts.force &&
-      cacheValid &&
-      cached.status === 200 &&
-      typeof cached.body === 'string' &&
-      cached.body.length > 0
-    ) {
+    const cached = this.store.getFetch(url) as CachedFetch | undefined;
+    const cacheValid = cached &&
+      cached.expiresAt &&
+      new Date(cached.expiresAt).getTime() > Date.now() &&
+      Array.isArray(cached.papers);
+    if (!this.opts.force && cacheValid && cached) {
       this.cacheHits += 1;
       this.opts.logger?.debug('crawl_http_cache_hit', {
         provider: this.provider,
         url,
-        http_status: cached.status,
+        papers: (cached.papers as unknown[]).length,
       });
-      return cached.body;
+      return cached.papers as unknown[];
     }
 
     let lastError: unknown = new Error(`Unable to fetch ${url}`);
@@ -181,7 +190,7 @@ class HttpClient {
           Accept: options.accept,
         };
         if (cached?.etag) headers['If-None-Match'] = cached.etag;
-        if (cached?.last_modified) headers['If-Modified-Since'] = cached.last_modified;
+        if (cached?.lastModified) headers['If-Modified-Since'] = cached.lastModified;
         this.networkFetches += 1;
         const response = await fetch(url, { signal: controller.signal, headers });
         this.opts.logger?.debug('crawl_http_response', {
@@ -191,28 +200,27 @@ class HttpClient {
           attempt: attempt + 1,
           elapsed_ms: Date.now() - requestStarted,
         });
-        if (response.status === 304 && cached?.body) {
-          this.store.saveFetch(url, {
-            status: 200,
-            body: cached.body,
-            bodyHash: cached.body_hash || hash(cached.body),
-            etag: cached.etag,
-            lastModified: cached.last_modified,
-            expiresAt: new Date(Date.now() + DAY_MS).toISOString(),
-          });
+        if (response.status === 304 && cached) {
+          this.store.saveFetch(
+            url,
+            cached.papers,
+            {
+              etag: cached.etag,
+              lastModified: cached.lastModified,
+              expiresAt: new Date(Date.now() + DAY_MS).toISOString(),
+            },
+          );
           this.opts.logger?.debug('crawl_http_not_modified', {
             provider: this.provider,
             url,
             elapsed_ms: Date.now() - requestStarted,
           });
-          return cached.body;
+          return Array.isArray(cached.papers) ? (cached.papers as unknown[]) : [];
         }
         if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-        const body = await response.text();
-        this.store.saveFetch(url, {
-          status: response.status,
-          body,
-          bodyHash: hash(body),
+        const entries = parse(await response.text());
+        if (!Array.isArray(entries)) throw new Error(`Parser did not produce a list for ${url}`);
+        this.store.saveFetch(url, entries, {
           etag: response.headers.get('etag') ?? '',
           lastModified: response.headers.get('last-modified') ?? '',
           expiresAt: new Date(Date.now() + DAY_MS).toISOString(),
@@ -222,10 +230,10 @@ class HttpClient {
           provider: this.provider,
           url,
           http_status: response.status,
-          bytes: Buffer.byteLength(body, 'utf8'),
+          papers: entries.length,
           elapsed_ms: Date.now() - requestStarted,
         });
-        return body;
+        return entries;
       } catch (error) {
         lastError = error;
         const retryDelayMs = 250 * 2 ** attempt;
@@ -291,9 +299,21 @@ export class PapersCoolCrawler implements PaperCrawler {
       const url = new URL(`${this.opts.baseUrl}/arxiv/${encodeURIComponent(category)}`);
       url.searchParams.set('date', dateOnly(day));
       url.searchParams.set('show', String(Math.max(this.opts.pageSize ?? DEFAULT_PAGE_SIZE, MAX_LIST_SHOW)));
-      let html: string;
+      let entries: Paper[];
       try {
-        html = await this.http.text(url.toString(), { accept: 'text/html,application/xhtml+xml' });
+        entries = await this.http.papers(
+          url.toString(),
+          { accept: 'text/html,application/xhtml+xml' },
+          (body: string) => {
+            const $ = cheerio.load(body);
+            const list: Paper[] = [];
+            for (const element of $('div.panel.paper').toArray()) {
+              const paper = this.parseListItem($, element);
+              if (paper) list.push(paper);
+            }
+            return list;
+          },
+        ) as Paper[];
       } catch (error) {
         errors.push({
           stage: 'list',
@@ -303,17 +323,14 @@ export class PapersCoolCrawler implements PaperCrawler {
         });
         continue;
       }
-      const $ = cheerio.load(html);
-      const items = $('div.panel.paper');
       this.opts.logger?.debug('crawl_list_page', {
         provider: 'papers.cool',
         category,
         date: dateOnly(day),
-        items: items.length,
+        items: entries.length,
       });
-      for (const element of items.toArray()) {
-        const paper = this.parseListItem($, element);
-        if (!paper || !withinWindow(paper.publishedAt, from, to)) continue;
+      for (const paper of entries) {
+        if (!withinWindow(paper.publishedAt, from, to)) continue;
         found.set(paper.arxivId, chooseLatest(found.get(paper.arxivId), paper));
       }
     }
@@ -443,9 +460,16 @@ export class PapersCoolCrawler implements PaperCrawler {
     const fallbackBase = baseUrl(this.opts.arxivBaseUrl ?? 'https://arxiv.org');
     const url = `${fallbackBase}/abs/${base.arxivId}${base.version ?? ''}`;
     try {
-      const html = await this.http.text(url, { accept: 'text/html,application/xhtml+xml' });
-      const $ = cheerio.load(html);
-      const abstractEn = abstractText($('blockquote.abstract').first().text());
+      // Fallback pages are single-purpose: cache the one extracted abstract
+      // entry so repeat runs skip the network without storing raw HTML.
+      const [abstractEn = ''] = await this.http.papers(
+        url,
+        { accept: 'text/html,application/xhtml+xml' },
+        (body: string) => {
+          const $ = cheerio.load(body);
+          return [abstractText($('blockquote.abstract').first().text())];
+        },
+      ) as string[];
       if (!abstractEn) {
         errors.push({
           stage: 'fallback',
@@ -506,9 +530,21 @@ export class ArxivCrawler implements PaperCrawler {
       url.searchParams.set('max_results', String(pageSize));
       url.searchParams.set('sortBy', 'submittedDate');
       url.searchParams.set('sortOrder', 'descending');
-      let xml: string;
+      let entries: Paper[];
       try {
-        xml = await this.http.text(url.toString(), { accept: 'application/atom+xml, application/xml' });
+        entries = await this.http.papers(
+          url.toString(),
+          { accept: 'application/atom+xml, application/xml' },
+          (xml: string) => {
+            const $ = cheerio.load(xml, { xmlMode: true });
+            const list: Paper[] = [];
+            for (const element of $('entry').toArray()) {
+              const paper = this.parseEntry($, element);
+              if (paper) list.push(paper);
+            }
+            return list;
+          },
+        ) as Paper[];
       } catch (error) {
         errors.push({
           stage: 'list',
@@ -518,8 +554,6 @@ export class ArxivCrawler implements PaperCrawler {
         });
         break;
       }
-      const $ = cheerio.load(xml, { xmlMode: true });
-      const entries = $('entry');
       this.opts.logger?.debug('crawl_list_page', {
         provider: 'arxiv',
         category,
@@ -527,10 +561,10 @@ export class ArxivCrawler implements PaperCrawler {
         page_size: pageSize,
         entries: entries.length,
       });
+      // An empty page ends pagination; a short page marks the last one.
       if (entries.length === 0) break;
-      for (const element of entries.toArray()) {
-        const paper = this.parseEntry($, element);
-        if (!paper || !withinWindow(paper.publishedAt, from, to)) continue;
+      for (const paper of entries) {
+        if (!withinWindow(paper.publishedAt, from, to)) continue;
         found.set(paper.arxivId, chooseLatest(found.get(paper.arxivId), paper));
       }
       if (entries.length < pageSize) break;

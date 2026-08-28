@@ -57,17 +57,11 @@ const paper = (id: string, publishedAt = '2024-01-02T00:00:00.000Z'): Paper => (
     contentHash: `hash-${id}`,
 });
 
-const meta = {
-    promptVersion: 'v1',
-    agentVersion: 'chat-completions-v1',
-    provider: 'test',
-    model: 'test-model',
-};
+const model = 'test-model';
 
 const result = (primary: string, secondary?: string): ClassificationResult => ({
     categories: secondary ? [primary, secondary] : [primary],
     tags: ['attention'],
-    raw: '{"categories":["' + primary + '"]}',
 });
 
 describe('classification cache', () => {
@@ -78,11 +72,11 @@ describe('classification cache', () => {
             const key = 'k1';
             expect(store.getClassification(key)).toBeUndefined();
 
-            store.saveClassification(key, paper('2401.01234'), meta, result('llm-architecture'));
+            store.saveClassification(key, paper('2401.01234'), model, result('llm-architecture'));
             const cached = store.getClassification(key);
             expect(cached?.categories).toEqual(['llm-architecture']);
             expect(cached?.tags).toEqual(['attention']);
-            expect(cached?.raw).toContain('llm-architecture');
+            expect(cached).not.toHaveProperty('raw');
             expect(store.latestClassification('2401.01234')?.categories).toEqual(['llm-architecture']);
         } finally {
             cleanup();
@@ -93,11 +87,11 @@ describe('classification cache', () => {
         const { store, cleanup } = makeStore();
         try {
             store.savePaper(paper('2401.01234'));
-            store.saveClassification('key-a', paper('2401.01234'), meta, result('llm-architecture'));
+            store.saveClassification('key-a', paper('2401.01234'), model, result('llm-architecture'));
             expect(store.getClassification('key-b')).toBeUndefined();
             // Rows no longer carry a taxonomy hash column; key isolation is the
             // only invalidation signal, and different keys stay independent.
-            store.saveClassification('key-c', paper('2401.01234'), meta, result('other'));
+            store.saveClassification('key-c', paper('2401.01234'), model, result('other'));
             expect(store.getClassification('key-c')?.categories).toEqual(['other']);
         } finally {
             cleanup();
@@ -110,7 +104,7 @@ describe('clearClassifications', () => {
         const { store, cleanup } = makeStore();
         try {
             store.savePaper(paper('2401.01234'));
-            store.saveClassification('k1', paper('2401.01234'), meta, result('other'));
+            store.saveClassification('k1', paper('2401.01234'), model, result('other'));
             // Everything was just written, so nothing is older than 30 days.
             expect(store.clearClassifications(30)).toBe(0);
             expect(store.getClassification('k1')).toBeDefined();
@@ -119,7 +113,7 @@ describe('clearClassifications', () => {
             expect(store.clearClassifications(0)).toBe(1);
             expect(store.getClassification('k1')).toBeUndefined();
 
-            store.saveClassification('k2', paper('2401.01234'), meta, result('llm-physics'));
+            store.saveClassification('k2', paper('2401.01234'), model, result('llm-physics'));
             expect(store.clearClassifications()).toBe(1);
             expect(store.getClassification('k2')).toBeUndefined();
             expect(store.stats().classifications).toBe(0);
@@ -169,7 +163,7 @@ describe('stats and prune', () => {
         const { store, cleanup } = makeStore();
         try {
             store.savePaper(paper('2401.01234'));
-            store.saveClassification('k1', paper('2401.01234'), meta, result('other'));
+            store.saveClassification('k1', paper('2401.01234'), model, result('other'));
             const stats = store.stats();
             expect(stats.papers).toBe(1);
             expect(stats.classifications).toBe(1);
@@ -177,7 +171,10 @@ describe('stats and prune', () => {
             expect(stats).not.toHaveProperty('relevance');
             expect(stats).not.toHaveProperty('translations');
 
-            store.saveFetch('https://example.com', { status: 200, body: 'x', bodyHash: 'h' });
+            store.saveFetch('https://example.com/list', [{ arxivId: '2401.01234' }], {
+                expiresAt: '2024-02-01T00:00:00.000Z',
+            });
+            expect(store.getFetch('https://example.com/list')?.papers).toEqual([{ arxivId: '2401.01234' }]);
             // Nothing is older than the cutoff for a huge window.
             expect(store.prune(3650)).toBe(0);
             expect(store.getClassification('k1')).toBeDefined();
@@ -185,6 +182,7 @@ describe('stats and prune', () => {
             // age=0 prunes everything recorded before "now".
             expect(store.prune(0)).toBeGreaterThanOrEqual(2);
             expect(store.getClassification('k1')).toBeUndefined();
+            expect(store.getFetch('https://example.com/list')).toBeUndefined();
         } finally {
             cleanup();
         }
@@ -194,6 +192,35 @@ describe('stats and prune', () => {
         const { store, cleanup } = makeStore();
         try {
             expect(() => store.prune(-1)).toThrow(/non-negative/);
+        } finally {
+            cleanup();
+        }
+    });
+});
+
+describe('fetch cache', () => {
+    it('stores extracted paper lists, never a raw body', () => {
+        const { store, cleanup } = makeStore();
+        try {
+            expect(store.getFetch('https://example.com/list')).toBeUndefined();
+            const entries = [
+                { arxivId: '2401.01234', title: 'One' },
+                { arxivId: '2401.01235', title: 'Two' },
+            ];
+            store.saveFetch('https://example.com/list', entries, {
+                etag: 'W/"e1"',
+                lastModified: 'Mon, 01 Jan 2024 00:00:00 GMT',
+                expiresAt: '2024-02-01T00:00:00.000Z',
+            });
+            const cached = store.getFetch('https://example.com/list')!;
+            expect(cached.papers).toEqual(entries);
+            expect(cached.etag).toBe('W/"e1"');
+            expect(cached.lastModified).toBe('Mon, 01 Jan 2024 00:00:00 GMT');
+            expect(cached.expiresAt).toBe('2024-02-01T00:00:00.000Z');
+
+            // Corrupt rows degrade to a miss instead of throwing.
+            store.db.exec("UPDATE fetch_cache SET papers_json='{' WHERE url='https://example.com/list'");
+            expect(store.getFetch('https://example.com/list')).toBeUndefined();
         } finally {
             cleanup();
         }

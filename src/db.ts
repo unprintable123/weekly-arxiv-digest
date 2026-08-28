@@ -163,9 +163,7 @@ CREATE TABLE IF NOT EXISTS papers (
 );
 CREATE TABLE IF NOT EXISTS fetch_cache (
   url TEXT PRIMARY KEY,
-  status INTEGER,
-  body TEXT,
-  body_hash TEXT,
+  papers_json TEXT,
   etag TEXT,
   last_modified TEXT,
   expires_at TEXT,
@@ -175,13 +173,9 @@ CREATE TABLE IF NOT EXISTS classification_cache (
   cache_key TEXT PRIMARY KEY,
   arxiv_id TEXT,
   content_hash TEXT,
-  prompt_version TEXT,
-  client_version TEXT,
-  provider TEXT,
   model TEXT,
   categories_json TEXT,
   tags_json TEXT,
-  raw TEXT,
   status TEXT,
   created_at TEXT
 );
@@ -259,31 +253,41 @@ export class Store {
     return rowToPaper(row);
   }
 
-  getFetch(url: string): any {
-    return this.db.prepare('SELECT * FROM fetch_cache WHERE url=?').get(url) as any;
+  /** Cached extraction result for one URL, plus conditional-request metadata. */
+  getFetch(url: string): {
+    papers: unknown;
+    etag: string;
+    lastModified: string;
+    expiresAt: string;
+  } | undefined {
+    const row = this.db.prepare('SELECT * FROM fetch_cache WHERE url=?').get(url) as any;
+    if (!row || typeof row.papers_json !== 'string' || !row.papers_json) return undefined;
+    try {
+      return {
+        papers: JSON.parse(row.papers_json),
+        etag: String(row.etag || ''),
+        lastModified: String(row.last_modified || ''),
+        expiresAt: String(row.expires_at || ''),
+      };
+    } catch {
+      return undefined;
+    }
   }
 
-  saveFetch(url: string, data: {
-    status: number;
-    body: string;
-    bodyHash: string;
+  /** Store the extracted paper list for a URL (never the raw response body). */
+  saveFetch(url: string, papers: unknown, meta: {
     etag?: string;
     lastModified?: string;
     expiresAt?: string;
   }): void {
-    // Successful responses only: failed requests are retried on the next run
-    // and are never cached, so the table holds no error column.
-    if (data.status !== 200) return;
     this.db
-      .prepare('INSERT OR REPLACE INTO fetch_cache VALUES (?,?,?,?,?,?,?,?)')
+      .prepare('INSERT OR REPLACE INTO fetch_cache VALUES (?,?,?,?,?,?)')
       .run(
         url,
-        data.status,
-        data.body,
-        data.bodyHash,
-        data.etag || '',
-        data.lastModified || '',
-        data.expiresAt || '',
+        JSON.stringify(papers),
+        meta.etag || '',
+        meta.lastModified || '',
+        meta.expiresAt || '',
         new Date().toISOString(),
       );
   }
@@ -296,7 +300,6 @@ export class Store {
       row && {
         categories: JSON.parse(row.categories_json),
         tags: JSON.parse(row.tags_json),
-        raw: row.raw,
       }
     );
   }
@@ -311,7 +314,6 @@ export class Store {
       row && {
         categories: JSON.parse(row.categories_json),
         tags: JSON.parse(row.tags_json),
-        raw: row.raw,
       }
     );
   }
@@ -319,27 +321,18 @@ export class Store {
   saveClassification(
     key: string,
     p: Paper,
-    meta: {
-      promptVersion: string;
-      agentVersion: string;
-      provider: string;
-      model: string;
-    },
+    model: string,
     r: ClassificationResult,
   ): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?)')
       .run(
         key,
         p.arxivId,
         p.contentHash,
-        meta.promptVersion,
-        meta.agentVersion,
-        meta.provider,
-        meta.model,
+        model,
         JSON.stringify(r.categories),
         JSON.stringify(r.tags),
-        r.raw || '',
         'ok',
         new Date().toISOString(),
       );

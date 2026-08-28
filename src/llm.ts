@@ -283,8 +283,6 @@ export async function classifyPapers(
                 content: raw.slice(0, 200) + (raw.length > 200 ? '...' : ''),
             });
             const results = normalizeBatchClassification(taxonomy, papers, extractJson(raw));
-            // Keep the raw batch response on every paper for the cache table.
-            for (const classification of results.values()) classification.raw = raw;
             return results;
         } catch (error) {
             last = error;

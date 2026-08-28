@@ -20,7 +20,7 @@
 
 - `src/config.ts`：读取 YAML、校验字段和解析来源类别配置。
 - `src/window.ts`：计算 ISO 周窗口，默认最近一个完整周，也支持显式 `--from`/`--to`。
-- `src/crawler.ts`：抓取分类列表和详情页，解析元数据与摘要，处理分页、版本去重、限速、重试和 HTTP 缓存。
+- `src/crawler.ts`：抓取列表并立即解析为论文数据，处理分页、版本去重、限速、重试、HTTP 缓存（仅缓存提取结果）；不为详情页重复请求 PDF。
 - `src/llm.ts`：通过 chat completion API 执行分类/tag 请求，并校验受控 JSON 返回值。
 - `src/db.ts`：持久化论文、抓取响应和分类结果；写入在内存累积，按固定节奏刷盘。
 - `src/pipeline.ts`：编排收集、分类、排序和输出，保证缓存命中时不重复调用网络或 agent。
@@ -107,8 +107,8 @@ agent 必须返回一个 JSON 对象：
 SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，它只是一个可复用的缓存库，不是运行历史数据库：没有 runs、run_papers、run_documents 这类运行跟踪表，也没有错误日志表。查找一篇论文的唯一途径是 `papers` 表加上 `classification_cache`（按缓存 key 命中）。保留四张表：
 
 - `papers`：arXiv ID（主键）、版本、标题、作者 JSON、原始 arXiv 分类、英文摘要、发布时间、更新时间、详情 URL、内容 hash、抓取时间。不再保存 `source_url`；papers.cool 链接由 arXiv ID 按固定模板构造。
-- `fetch_cache`：URL（主键）、HTTP 状态、响应体、响应体 hash、ETag/Last-Modified、过期时间和抓取时间。只缓存 200 响应；失败请求从不落盘，下次运行自然重试。没有 error 列。
-- `classification_cache`：缓存 key（主键）、arXiv ID、内容 hash、prompt 版本、client 版本、endpoint、model、category JSON、tag JSON、原始响应、状态和时间。没有独立的 `taxonomy_hash` 列：taxonomy hash 只参与缓存 key 的计算，因此 taxonomy/prompt/model/endpoint 任一变化自然产生新 key，旧条目自动失效。
+- `fetch_cache`：URL（主键）、解析后的论文列表 JSON、ETag/Last-Modified、过期时间和抓取时间。不存原始响应体：HTTP 层在拿到响应后立即用 DOM/XML 解析器提取条目，只落盘提取结果，因此命中缓存同时跳过网络请求和解析开销，数据库体积也大幅缩小。失败请求从不落盘，下次运行自然重试。
+- `classification_cache`：缓存 key（主键）、arXiv ID、内容 hash、model、category JSON、tag JSON、状态和时间。prompt 版本、client 版本、endpoint 和原始响应不落库：前三者只参与缓存 key 的计算（taxonomy/prompt/client/model/endpoint 任一变化产生新 key，旧条目自动失效），原始 LLM 响应不保存，只保留归一化后的 category/tag。
 - `meta`：极小的 key/value 表，目前仅保存 `(week, config hash) -> generated_at`，用于让全缓存重复运行的输出字节一致。
 
 写入 IO：sql.js 数据库完全驻留内存，写语句不触发磁盘 IO。刷盘（导出内存快照到临时文件再原子 rename）按以下节奏执行：抓取阶段结束一次；分类阶段每积累 100 条新增分类结果一次，阶段结束时再补齐不足 100 条的尾部；meta 更新后；`close()`。纯缓存命中的读取路径不产生任何写入和刷盘。进程崩溃最多丢失最近未刷盘的新增缓存，且由于快照是原子替换，磁盘上的旧库文件永远不会损坏。不做旧版本数据库自动迁移：库文件结构仅由当前代码的 SCHEMA 决定，删除旧库文件即重新开始缓存。`cache prune` 在一个事务中完成删除。默认不自动清理缓存。

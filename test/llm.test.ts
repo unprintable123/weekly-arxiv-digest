@@ -278,7 +278,7 @@ describe('normalizeBatchClassification', () => {
 describe('classifyPapers', () => {
     const batch = [paper(), paper({ arxivId: '2401.01235', title: 'Mixture of Experts Revisited' })];
 
-    it('sends one batch prompt and returns validated classifications with raw output', async () => {
+    it('sends one batch prompt and returns validated classifications', async () => {
         const invoker = {
             complete: vi.fn(async () =>
                 JSON.stringify([
@@ -290,7 +290,7 @@ describe('classifyPapers', () => {
         const results = await classifyPapers(batch, taxonomy, agent, invoker);
         expect(results.get('2401.01234')?.categories).toEqual(['llm-architecture']);
         expect(results.get('2401.01235')?.categories).toEqual(['llm-physics']);
-        expect(results.get('2401.01234')?.raw).toContain('llm-architecture');
+        expect(results.get('2401.01234')).not.toHaveProperty('raw');
         expect(invoker.complete).toHaveBeenCalledTimes(1);
         const [prompt, options] = invoker.complete.mock.calls[0];
         expect(prompt).toContain(batch[0].title);
