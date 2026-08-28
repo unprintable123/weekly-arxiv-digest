@@ -15,6 +15,7 @@ rules:
   classification_output:
     categories: topic ids, ordered primary then optional secondary
     tags: lowercase kebab-case strings
+    tldr: one concise sentence in Simplified Chinese
 
 precedence:
   - multimodal-agent > agent-design

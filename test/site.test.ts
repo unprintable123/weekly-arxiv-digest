@@ -32,7 +32,7 @@ const sampleDocument = (overrides: Record<string, unknown> = {}) => ({
             abstractEn: 'We study attention.',
             publishedAt: '2024-01-02T00:00:00.000Z',
             categories: ['cs.LG'],
-            classification: { categories: ['llm-architecture'], tags: ['attention'] },
+            classification: { categories: ['llm-architecture'], tags: ['attention'], tldr: '一句话中文摘要。' },
         },
     ],
     ...overrides,
@@ -55,7 +55,7 @@ function makeWeekDir(categoryIds: string[]): string {
                     abstractEn: 'text',
                     publishedAt: '2024-01-02T00:00:00.000Z',
                     categories: [],
-                    classification: { categories: [categoryId], tags: [] },
+                    classification: { categories: [categoryId], tags: [], tldr: '一句话中文摘要。' },
                 }))
             }))}\n`,
             'utf8',
@@ -99,7 +99,15 @@ describe('toWebDocument / parseWebDocument', () => {
         ]);
         expect(web.papers[0]).not.toHaveProperty('contentHash');
         expect(web.papers[0]).not.toHaveProperty('detailUrl');
+        expect(web.papers[0].classification.tldr).toBe('一句话中文摘要。');
         expect(parseWebDocument(`${stableJson(web)}\n`)).toEqual(web);
+    });
+
+    it('tolerates legacy documents without a tldr field', () => {
+        const legacy = JSON.parse(stableJson(sampleDocument()));
+        delete legacy.papers[0].classification.tldr;
+        const parsed = parseWebDocument(`${stableJson(legacy)}\n`);
+        expect(parsed?.papers[0].classification.tldr).toBeUndefined();
     });
 
     it('rejects malformed documents', () => {

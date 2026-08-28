@@ -75,3 +75,11 @@ export function weekWindow(
   const info = iso(start);
   return { from: start, to: end, week: `${info.year}-W${String(info.week).padStart(2, '0')}` };
 }
+
+/** ISO week id (`YYYY-Www`) for a calendar date string or Date (UTC-based). */
+export function isoWeekOf(date: string | Date): string {
+  const value = typeof date === 'string' ? new Date(date) : date;
+  if (Number.isNaN(value.getTime())) return '';
+  const info = iso(value);
+  return `${info.year}-W${String(info.week).padStart(2, '0')}`;
+}

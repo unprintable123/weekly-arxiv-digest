@@ -18,7 +18,7 @@ const jsonDir = join(root, 'digests-json');
 const outDir = join(root, 'dist', 'site');
 
 if (!existsSync(join(jsonDir, 'index.json'))) {
-    console.error('error: digests-json/index.json is missing; run `pnpm digest web build --week YYYY-Www` first');
+    console.error('error: digests-json/index.json is missing; run `pnpm digest web build` first');
     process.exit(1);
 }
 

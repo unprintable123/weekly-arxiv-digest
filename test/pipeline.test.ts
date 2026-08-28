@@ -44,12 +44,13 @@ function loadRootConfig(root: string) {
 function setupInvoker(overrides: { attention?: string[]; moe?: string[] } = {}) {
     return {
         complete: vi.fn(async (prompt: string) => {
-            const entries: { id: string; categories: string[]; tags: string[] }[] = [];
+            const entries: { id: string; categories: string[]; tags: string[]; tldr: string }[] = [];
             if (prompt.includes('Attention Is All You Need')) {
                 entries.push({
                     id: '2401.01234',
                     categories: overrides.attention ?? ['test-architecture', 'test-training'],
                     tags: ['attention', 'transformer'],
+                    tldr: '提出可扩展的注意力机制。',
                 });
             }
             if (prompt.includes('Mixture of Experts')) {
@@ -57,10 +58,11 @@ function setupInvoker(overrides: { attention?: string[]; moe?: string[] } = {}) 
                     id: '2401.01235',
                     categories: overrides.moe ?? ['test-architecture'],
                     tags: ['mixture-of-experts'],
+                    tldr: '研究混合专家模型的可扩展性。',
                 });
             }
             if (!entries.length) {
-                entries.push({ id: 'unknown-paper', categories: ['other'], tags: [] });
+                entries.push({ id: 'unknown-paper', categories: ['other'], tags: [], tldr: '未知论文。' });
             }
             return JSON.stringify(entries);
         }),
@@ -119,6 +121,8 @@ describe('runDigest', () => {
             // Chinese topic names are a taxonomy concern; the digest only asserts ids.
             expect(architecture).toContain('- **Category:** test-architecture'.replace('test-architecture', 'Architecture'));
             expect(architecture).toContain('- **Tag:** `attention`, `transformer`');
+            expect(architecture).toContain('- **TLDR:** 提出可扩展的注意力机制。');
+            expect(architecture).toContain('- **TLDR:** 研究混合专家模型的可扩展性。');
             expect(architecture).toContain('- **Authors:** Alice Example, Bob Sample');
             expect(architecture).toContain('[2401.01234](https://arxiv.org/abs/2401.01234)');
             expect(architecture).toContain('- **papers.cool:** [2401.01234](https://papers.cool/arxiv/2401.01234)');
@@ -335,12 +339,12 @@ describe('runDigest', () => {
                         failMoe = false;
                         throw new Error('classify boom');
                     }
-                    const entries: { id: string; categories: string[]; tags: string[] }[] = [];
+                    const entries: { id: string; categories: string[]; tags: string[]; tldr: string }[] = [];
                     if (wantsAttention) {
-                        entries.push({ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] });
+                        entries.push({ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'], tldr: '提出可扩展的注意力机制。' });
                     }
                     if (wantsMoe) {
-                        entries.push({ id: '2401.01235', categories: ['test-architecture'], tags: [] });
+                        entries.push({ id: '2401.01235', categories: ['test-architecture'], tags: [], tldr: '研究混合专家模型的可扩展性。' });
                     }
                     return JSON.stringify(entries);
                 }),
@@ -387,9 +391,9 @@ describe('runDigest', () => {
                         return '{"categories": ["test-architecture"], "tags": []}';
                     }
                     if (prompt.includes('Mixture of Experts')) {
-                        return JSON.stringify([{ id: '2401.01235', categories: ['test-architecture'], tags: [] }]);
+                        return JSON.stringify([{ id: '2401.01235', categories: ['test-architecture'], tags: [], tldr: '研究混合专家模型的可扩展性。' }]);
                     }
-                    return JSON.stringify([{ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] }]);
+                    return JSON.stringify([{ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'], tldr: '提出可扩展的注意力机制。' }]);
                 }),
             };
             stubCrawl();
@@ -420,12 +424,12 @@ describe('runDigest', () => {
                         if (invoker.complete.mock.calls.length >= 2) failMoe = false;
                         throw new Error('moe classify boom');
                     }
-                    const entries: { id: string; categories: string[]; tags: string[] }[] = [];
+                    const entries: { id: string; categories: string[]; tags: string[]; tldr: string }[] = [];
                     if (prompt.includes('Attention Is All You Need')) {
-                        entries.push({ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] });
+                        entries.push({ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'], tldr: '提出可扩展的注意力机制。' });
                     }
                     if (prompt.includes('Mixture of Experts')) {
-                        entries.push({ id: '2401.01235', categories: ['test-architecture'], tags: [] });
+                        entries.push({ id: '2401.01235', categories: ['test-architecture'], tags: [], tldr: '研究混合专家模型的可扩展性。' });
                     }
                     return JSON.stringify(entries);
                 }),
@@ -516,11 +520,12 @@ describe('web output', () => {
             // Data twin carries the same paper content as the Markdown file.
             const json = JSON.parse(readFileSync(join(jsonDir, 'weekly-2024-W01-test-architecture.json'), 'utf8')) as {
                 categoryId: string;
-                papers: Array<{ arxivId: string; classification: { tags: string[] } }>;
+                papers: Array<{ arxivId: string; classification: { tags: string[]; tldr: string } }>;
             };
             expect(json.categoryId).toBe('test-architecture');
             expect(json.papers.map((paper) => paper.arxivId).sort()).toEqual(['2401.01234', '2401.01235']);
             expect(json.papers.some((paper) => paper.classification.tags.includes('attention'))).toBe(true);
+            expect(json.papers.some((paper) => paper.classification.tldr.includes('注意力'))).toBe(true);
 
             // Week manifest: sorted ids with counts + taxonomy group metadata;
             // global index lists the week.
@@ -617,6 +622,52 @@ describe('web output', () => {
             const { buildWebDigests: rebuild } = await import('../src/pipeline.js');
             await rebuild(root, cfg, '2024-W01');
             expect(normalize(readFileSync(backfillFile!, 'utf8'))).toBe(before);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('buildAllWebDigests backfills every cached week by default', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+            await runDigest(cfg, window(), { root, invoker, dryRun: true });
+
+            const { buildAllWebDigests } = await import('../src/pipeline.js');
+            const all = await buildAllWebDigests(root, cfg);
+            expect(all.weeks).toEqual(['2024-W01']);
+            expect(all.skipped).toEqual([]);
+            expect(all.categories).toEqual(['test-architecture', 'test-training']);
+            expect(all.files).toHaveLength(4); // 2 category json + 2 manifests, deduped
+            expect(existsSync(join(root, 'digests-json', '2024-W01', 'weekly-2024-W01-test-training.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests-json', '2024-W01', 'index.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests-json', 'index.json'))).toBe(true);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('buildAllWebDigests skips weeks without cached classifications', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+            await runDigest(cfg, window(), { root, invoker, dryRun: true });
+
+            const { Store } = await import('../src/db.js');
+            const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
+            store.clearClassifications();
+            store.flush();
+            store.close();
+
+            const { buildAllWebDigests } = await import('../src/pipeline.js');
+            const all = await buildAllWebDigests(root, cfg);
+            expect(all.weeks).toEqual([]);
+            expect(all.skipped).toEqual(['2024-W01']);
+            expect(all.files).toHaveLength(0);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

@@ -20,6 +20,8 @@ export type WebPaper = {
     classification: {
         categories: string[];
         tags: string[];
+        /** Absent in legacy documents generated before the tldr feature. */
+        tldr?: string;
     };
 };
 
@@ -77,6 +79,8 @@ const webPaperSchema = z.object({
     classification: z.object({
         categories: z.array(z.string()),
         tags: z.array(z.string()),
+        // Optional so legacy documents (generated before tldr) still parse.
+        tldr: z.string().optional(),
     }),
 });
 
@@ -153,7 +157,7 @@ export function toWebDocument(document: {
         categories: string[];
         abstractEn: string;
         publishedAt: string;
-        classification: { categories: string[]; tags: string[] };
+        classification: { categories: string[]; tags: string[]; tldr: string };
     }>;
 }): WebDigestDocument {
     return {
@@ -178,6 +182,7 @@ export function toWebDocument(document: {
             classification: {
                 categories: paper.classification.categories,
                 tags: paper.classification.tags,
+                tldr: paper.classification.tldr,
             },
         })),
     };

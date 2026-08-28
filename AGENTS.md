@@ -86,7 +86,7 @@ pnpm digest preview --week YYYY-Www [--config config.yaml]
 pnpm digest cache stats
 pnpm digest cache prune [--older-than DAYS]
 pnpm digest cache clear-classifications [--older-than DAYS]
-pnpm digest web build --week YYYY-Www [--config config.yaml]
+pnpm digest web build [--week YYYY-Www] [--config config.yaml]
 pnpm site:css
 pnpm site:build
 pnpm site:deploy

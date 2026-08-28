@@ -8,6 +8,7 @@ import {
     LLM_CLIENT_VERSION,
     normalizeBatchClassification,
     normalizeClassification,
+    TLDR_MAX_CHARS,
 } from '../src/llm.js';
 import type { Paper } from '../src/types.js';
 import { fixtureTaxonomy } from './helpers.js';
@@ -39,6 +40,8 @@ describe('buildClassificationPrompt', () => {
         expect(prompt).toContain('test-reasoning');
         expect(prompt).toContain('Use "other" only when no other topic fits.');
         expect(prompt).toContain('JSON array');
+        expect(prompt).toContain('"tldr"');
+        expect(prompt).toContain('Simplified Chinese');
         expect(prompt).toContain('id: 2401.01234');
         expect(prompt).toContain('id: 2401.01235');
         // Instructions and catalog come before the paper list.
@@ -57,7 +60,7 @@ describe('buildClassificationPrompt', () => {
         expect(prompt).not.toContain('Score relevance');
         expect(prompt).not.toContain('Translate the following');
         // The version is a fixed constant, not configurable.
-        expect(CLASSIFICATION_PROMPT_VERSION).toBe('v2');
+        expect(CLASSIFICATION_PROMPT_VERSION).toBe('v3');
         expect(CLASSIFICATION_BATCH_SIZE).toBeGreaterThan(1);
     });
 });
@@ -67,15 +70,18 @@ describe('normalizeClassification', () => {
         const result = normalizeClassification(taxonomy, {
             categories: ['test-architecture', 'test-reasoning'],
             tags: ['attention'],
+            tldr: '一篇中文摘要。',
         });
         expect(result.categories).toEqual(['test-architecture', 'test-reasoning']);
         expect(result.tags).toEqual(['attention']);
+        expect(result.tldr).toBe('一篇中文摘要。');
     });
 
     it('resolves aliases and drops unknown categories', () => {
         const result = normalizeClassification(taxonomy, {
             categories: ['arch', 'made-up-topic'],
             tags: [],
+            tldr: '一篇中文摘要。',
         });
         expect(result.categories).toEqual(['test-architecture']);
     });
@@ -85,6 +91,7 @@ describe('normalizeClassification', () => {
         const result = normalizeClassification(taxonomy, {
             categories: ['test-training', 'test-architecture', 'test-reasoning'],
             tags: [],
+            tldr: '一篇中文摘要。',
         });
         expect(result.categories).toEqual(['test-architecture', 'test-training']);
         expect(result.categories).toHaveLength(taxonomy.rules.maxCategories);
@@ -94,6 +101,7 @@ describe('normalizeClassification', () => {
         const result = normalizeClassification(taxonomy, {
             categories: ['test-architecture'],
             tags: ['Attention', 'attention', 'not a tag!', 'a-b-c-d-e', 'state-space-model'],
+            tldr: '一篇中文摘要。',
         });
         // 'Attention' lowercases into a duplicate; 'not a tag!' is invalid;
         // the cap of three tags is enforced.
@@ -101,13 +109,41 @@ describe('normalizeClassification', () => {
     });
 
     it('rejects empty categories, wrong shapes and unknown-only categories', () => {
-        expect(() => normalizeClassification(taxonomy, { categories: [], tags: [] })).toThrow();
-        expect(() => normalizeClassification(taxonomy, { categories: ['ghost'], tags: [] })).toThrow(
+        expect(() => normalizeClassification(taxonomy, { categories: [], tags: [], tldr: 'x' })).toThrow();
+        expect(() => normalizeClassification(taxonomy, { categories: ['ghost'], tags: [], tldr: 'x' })).toThrow(
             /no valid topic id/,
         );
         expect(() => normalizeClassification(taxonomy, { tags: [] })).toThrow();
         expect(() => normalizeClassification(taxonomy, 'not an object')).toThrow();
-        expect(() => normalizeClassification(taxonomy, { categories: ['test-architecture'], tags: 'x' })).toThrow();
+        expect(() => normalizeClassification(taxonomy, { categories: ['test-architecture'], tags: 'x', tldr: 'y' })).toThrow();
+    });
+
+    it('normalizes the tldr: trims, collapses whitespace and strips quotes', () => {
+        const result = normalizeClassification(taxonomy, {
+            categories: ['test-architecture'],
+            tags: [],
+            tldr: '  该论文\n\n  提出了  一种方法。  ',
+        });
+        expect(result.tldr).toBe('该论文 提出了 一种方法。');
+        const quoted = normalizeClassification(taxonomy, {
+            categories: ['test-architecture'],
+            tags: [],
+            tldr: '"一句话摘要。"',
+        });
+        expect(quoted.tldr).toBe('一句话摘要。');
+    });
+
+    it('rejects an empty, whitespace-only or overlong tldr', () => {
+        expect(() =>
+            normalizeClassification(taxonomy, { categories: ['test-architecture'], tags: [], tldr: '   ' }),
+        ).toThrow(/empty tldr/);
+        expect(() =>
+            normalizeClassification(taxonomy, {
+                categories: ['test-architecture'],
+                tags: [],
+                tldr: 'x'.repeat(TLDR_MAX_CHARS + 1),
+            }),
+        ).toThrow(/exceeds/);
     });
 
     it('rejects response keys outside the fixed agent contract', () => {
@@ -121,6 +157,7 @@ describe('normalizeClassification', () => {
                 categories: ['test-architecture'],
                 tags: [],
                 score: 10,
+                tldr: 'x',
             }),
         ).toThrow(/unrecognized key/i);
     });
@@ -225,10 +262,11 @@ describe('normalizeBatchClassification', () => {
 
     it('maps one response object per paper, keyed by arxiv id', () => {
         const results = normalizeBatchClassification(taxonomy, batch, [
-            { id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] },
-            { id: '2401.01235', categories: ['other'], tags: [] },
+            { id: '2401.01234', categories: ['test-architecture'], tags: ['attention'], tldr: '一篇中文摘要。' },
+            { id: '2401.01235', categories: ['other'], tags: [], tldr: '另一篇中文摘要。' },
         ]);
         expect(results.get('2401.01234')?.categories).toEqual(['test-architecture']);
+        expect(results.get('2401.01234')?.tldr).toBe('一篇中文摘要。');
         expect(results.get('2401.01235')?.categories).toEqual(['other']);
         expect(results.size).toBe(2);
     });
@@ -236,20 +274,20 @@ describe('normalizeBatchClassification', () => {
     it('rejects missing, duplicate, or unknown paper ids', () => {
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: '2401.01234', categories: ['test-architecture'], tags: [] },
+                { id: '2401.01234', categories: ['test-architecture'], tags: [], tldr: 'x' },
             ]),
         ).toThrow(/missing papers/);
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: '2401.01234', categories: ['test-architecture'], tags: [] },
-                { id: '2401.01234', categories: ['other'], tags: [] },
-                { id: '2401.01235', categories: ['other'], tags: [] },
+                { id: '2401.01234', categories: ['test-architecture'], tags: [], tldr: 'x' },
+                { id: '2401.01234', categories: ['other'], tags: [], tldr: 'x' },
+                { id: '2401.01235', categories: ['other'], tags: [], tldr: 'x' },
             ]),
         ).toThrow(/duplicate or unknown/);
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: 'ghost', categories: ['other'], tags: [] },
-                { id: '2401.01235', categories: ['other'], tags: [] },
+                { id: 'ghost', categories: ['other'], tags: [], tldr: 'x' },
+                { id: '2401.01235', categories: ['other'], tags: [], tldr: 'x' },
             ]),
         ).toThrow(/duplicate or unknown/);
         expect(() => normalizeBatchClassification(taxonomy, batch, { not: 'an array' })).toThrow(
@@ -260,14 +298,14 @@ describe('normalizeBatchClassification', () => {
     it('still validates each entry against the taxonomy', () => {
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: '2401.01234', categories: ['ghost'], tags: [] },
-                { id: '2401.01235', categories: ['other'], tags: [] },
+                { id: '2401.01234', categories: ['ghost'], tags: [], tldr: 'x' },
+                { id: '2401.01235', categories: ['other'], tags: [], tldr: 'x' },
             ]),
         ).toThrow(/no valid topic id/);
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: '2401.01234', categories: ['test-architecture'], tags: [], score: 5 },
-                { id: '2401.01235', categories: ['other'], tags: [] },
+                { id: '2401.01234', categories: ['test-architecture'], tags: [], score: 5, tldr: 'x' },
+                { id: '2401.01235', categories: ['other'], tags: [], tldr: 'x' },
             ]),
         ).toThrow(/unrecognized key/i);
     });
@@ -280,8 +318,8 @@ describe('classifyPapers', () => {
         const invoker = {
             complete: vi.fn(async () =>
                 JSON.stringify([
-                    { id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] },
-                    { id: '2401.01235', categories: ['test-reasoning'], tags: [] },
+                    { id: '2401.01234', categories: ['test-architecture'], tags: ['attention'], tldr: '一篇中文摘要。' },
+                    { id: '2401.01235', categories: ['test-reasoning'], tags: [], tldr: '另一篇中文摘要。' },
                 ]),
             ),
         };
@@ -305,7 +343,7 @@ describe('classifyPapers', () => {
 
     it('parses fenced JSON array output', async () => {
         const invoker = {
-            complete: vi.fn(async () => '```json\n[{"id": "2401.01234", "categories": ["other"], "tags": []}]\n```'),
+            complete: vi.fn(async () => '```json\n[{"id": "2401.01234", "categories": ["other"], "tags": [], "tldr": "一篇中文摘要。"}]\n```'),
         };
         const results = await classifyPapers([paper()], taxonomy, agent, invoker);
         expect(results.get('2401.01234')?.categories).toEqual(['other']);
@@ -323,8 +361,8 @@ describe('classifyPapers', () => {
         const invoker = {
             complete: vi.fn(async () => {
                 calls += 1;
-                if (calls === 1) return '[{"id": "2401.01234", "categories": ["ghost"], "tags": []}]';
-                return '[{"id": "2401.01234", "categories": ["test-retrieval"], "tags": []}]';
+                if (calls === 1) return '[{"id": "2401.01234", "categories": ["ghost"], "tags": [], "tldr": "x"}]';
+                return '[{"id": "2401.01234", "categories": ["test-retrieval"], "tags": [], "tldr": "一篇中文摘要。"}]';
             }),
         };
         const results = await classifyPapers([paper()], taxonomy, agent, invoker);

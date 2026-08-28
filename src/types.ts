@@ -11,12 +11,14 @@ export type Paper = {
   contentHash: string;
 };
 
-/** Validated agent classification output. No score, no reason, no translation. */
+/** Validated agent classification output. No score, no reason. */
 export type ClassificationResult = {
   /** Canonical topic ids from TOPICS.yaml, primary first, at most `max_categories`. */
   categories: string[];
   /** Lowercase kebab-case tags, at most `max_tags`; may be empty. */
   tags: string[];
+  /** One-sentence Simplified-Chinese summary of the paper; non-empty. */
+  tldr: string;
 };
 
 export type ClassifiedPaper = Paper & {

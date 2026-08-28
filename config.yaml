@@ -14,7 +14,7 @@ source:
   request_delay_ms: 400
   timeout_ms: 20000
   user_agent: "weekly-digest/0.1"
-  concurrency: 5
+  concurrency: 20
 
 window:
   timezone: "UTC"

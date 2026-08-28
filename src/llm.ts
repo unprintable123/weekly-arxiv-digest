@@ -6,7 +6,10 @@ import type { ClassificationResult, Paper } from './types.js';
 import { sleep } from './util.js';
 
 /** Fixed prompt template version; part of the classification cache key. */
-export const CLASSIFICATION_PROMPT_VERSION = 'v2';
+export const CLASSIFICATION_PROMPT_VERSION = 'v3';
+
+/** Upper bound for the per-paper Chinese tldr, in characters. */
+export const TLDR_MAX_CHARS = 200;
 
 /**
  * Fixed number of papers per classification LLM call. Batching only changes
@@ -118,11 +121,12 @@ export function buildClassificationPrompt(papers: readonly Paper[], taxonomy: To
     return [
         'Classify the research papers listed at the end of this message using the controlled topic catalog below.',
         'Return one JSON array only. The array must contain exactly one JSON object per paper, in the same order as the papers are listed.',
-        'Each object must have exactly two keys:',
+        'Each object must have exactly three keys:',
         `- "id": the paper id given in the paper list, copied verbatim.`,
         `- "categories": array of 1-${taxonomy.rules.maxCategories} catalog topic ids, ordered primary first. Use "${taxonomy.rules.unknownTopic}" only when no other topic fits.`,
         `- "tags": array of 0-${taxonomy.rules.maxTags} lowercase kebab-case tags naming the concrete contribution. Prefer the topic's common tags; add a new tag only with clear evidence from the abstract.`,
-        'Rules: every category must be an exact topic id from the catalog; base each decision only on that paper\'s title and English abstract; do not invent facts; classify every paper exactly once; output no extra keys, no markdown, and no commentary.',
+        `- "tldr": one concise sentence in Simplified Chinese (at most 100 characters) summarizing the paper's core contribution and main result.`,
+        'Rules: every category must be an exact topic id from the catalog; base each decision only on that paper\'s title and English abstract; do not invent facts; the tldr must be a single complete Chinese sentence written by you, never quoted verbatim from the abstract; Please do not only say the name of the method in tldr, which does\'t include any useful information. Instead, please try to describe what type/category of method it is; classify every paper exactly once; output no extra keys, no markdown, and no commentary.',
         '',
         'Controlled topic catalog:',
         topicCatalog(taxonomy),
@@ -143,6 +147,7 @@ export function buildClassificationPrompt(papers: readonly Paper[], taxonomy: To
 const responseSchema = z.strictObject({
     categories: z.array(z.string()).min(1),
     tags: z.array(z.string()),
+    tldr: z.string().min(1),
 });
 
 /** One entry of the batch JSON array: paper id + per-paper classification. */
@@ -150,6 +155,7 @@ const batchEntrySchema = z.strictObject({
     id: z.string().min(1),
     categories: z.array(z.string()).min(1),
     tags: z.array(z.string()),
+    tldr: z.string().min(1),
 });
 
 /** Best-effort JSON extraction for models that wrap the object in code fences. */
@@ -176,8 +182,9 @@ function extractJson(raw: string): unknown {
  * Normalize the raw agent JSON against the taxonomy: categories are alias-
  * resolved, filtered to canonical ids, de-duplicated, precedence-ordered and
  * capped at `max_categories`; tags are lowercased, pattern-checked,
- * de-duplicated and capped at `max_tags`. Zero valid categories is an error so
- * it triggers the configured retry policy.
+ * de-duplicated and capped at `max_tags`; tldr is whitespace-normalized and
+ * must be a non-empty string within `TLDR_MAX_CHARS`. Zero valid categories or
+ * an empty tldr is an error so it triggers the configured retry policy.
  */
 export function normalizeClassification(
     taxonomy: TopicTaxonomy,
@@ -207,7 +214,33 @@ export function normalizeClassification(
         tags.push(clean);
         if (tags.length >= taxonomy.rules.maxTags) break;
     }
-    return { categories, tags };
+    const tldr = normalizeTldr(parsed.tldr);
+    if (!tldr) {
+        throw new Error('Classification returned an empty tldr');
+    }
+    if (tldr.length > TLDR_MAX_CHARS) {
+        throw new Error(`Classification tldr exceeds ${TLDR_MAX_CHARS} characters`);
+    }
+    return { categories, tags, tldr };
+}
+
+/**
+ * Trim, collapse internal whitespace/newlines to single spaces, and strip one
+ * layer of surrounding quotes a model may add around the sentence.
+ */
+function normalizeTldr(value: string): string {
+    let tldr = value.trim().replace(/\s+/g, ' ');
+    if (tldr.length >= 2) {
+        const first = tldr[0];
+        const last = tldr[tldr.length - 1];
+        const paired =
+            (first === '"' && last === '"') ||
+            (first === "'" && last === "'") ||
+            (first === '\u201c' && last === '\u201d') ||
+            (first === '\u300c' && last === '\u300d');
+        if (paired) tldr = tldr.slice(1, -1).trim();
+    }
+    return tldr;
 }
 
 /**

@@ -11,7 +11,7 @@ const paper = (overrides: Partial<ClassifiedPaper> = {}): ClassifiedPaper => ({
     publishedAt: '2024-01-02T00:00:00.000Z',
     detailUrl: 'https://arxiv.org/abs/2401.01234',
     contentHash: 'hash',
-    classification: { categories: ['llm-architecture', 'physics-of-llm'], tags: [] },
+    classification: { categories: ['llm-architecture', 'physics-of-llm'], tags: [], tldr: '一句话中文摘要。' },
     ...overrides,
 });
 
@@ -41,10 +41,11 @@ describe('MarkdownRenderer', () => {
 
     it('renders category, optional tag, authors, both links and the published date', () => {
         const out = new MarkdownRenderer().render(
-            document([paper({ classification: { categories: ['llm-architecture'], tags: ['attention', 'state-space-model'] } })]),
+            document([paper({ classification: { categories: ['llm-architecture'], tags: ['attention', 'state-space-model'], tldr: '一句话中文摘要。' } })]),
         );
         expect(out).toContain('- **Category:** Architecture');
         expect(out).toContain('- **Tag:** `attention`, `state-space-model`');
+        expect(out).toContain('- **TLDR:** 一句话中文摘要。');
         expect(out).toContain('- **Authors:** Alice Example, Bob Sample');
         expect(out).toContain('- **arXiv:** [2401.01234](https://arxiv.org/abs/2401.01234)');
         expect(out).toContain('- **papers.cool:** [2401.01234](https://papers.cool/arxiv/2401.01234)');
@@ -59,12 +60,21 @@ describe('MarkdownRenderer', () => {
         expect(out).not.toContain('**Tag:**');
     });
 
-    it('does not emit scores or translations', () => {
+    it('does not emit scores but renders the per-paper tldr', () => {
         const out = new MarkdownRenderer().render(document([paper()]));
         expect(out).not.toContain('Score');
-        // Category names come from the taxonomy, but the digest body itself
-        // must not contain translated output machinery.
-        expect(out).not.toContain('translation');
+        expect(out).toContain('- **TLDR:** 一句话中文摘要。');
+    });
+
+    it('escapes the tldr like other agent text and omits an empty one', () => {
+        const out = new MarkdownRenderer().render(
+            document([paper({ classification: { categories: ['llm-architecture'], tags: [], tldr: '包含 *斜体* 与 - 破折号。' } })]),
+        );
+        expect(out).toContain('- **TLDR:** 包含 \\*斜体\\* 与 \\- 破折号。');
+        const empty = new MarkdownRenderer().render(
+            document([paper({ classification: { categories: ['llm-architecture'], tags: [], tldr: '' } })]),
+        );
+        expect(empty).not.toContain('**TLDR:**');
     });
 
     it('escapes Markdown-significant characters in external text', () => {

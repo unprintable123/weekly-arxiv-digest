@@ -39,6 +39,9 @@ export class MarkdownRenderer implements Renderer {
             if (paper.classification.tags.length) {
                 out += `- **Tag:** ${paper.classification.tags.map((tag) => '`' + tag + '`').join(', ')}\n`;
             }
+            if (paper.classification.tldr) {
+                out += `- **TLDR:** ${md(paper.classification.tldr)}\n`;
+            }
             out += `- **Authors:** ${paper.authors.length ? paper.authors.map(md).join(', ') : 'Unknown'}\n`;
             // arXiv IDs are validated structured identifiers, safe unescaped.
             const arxivUrl = safeLink(paper.detailUrl);

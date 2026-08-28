@@ -226,6 +226,11 @@ export async function runDigest(
                 pending.push(paper);
             }
         }
+        logger.info('classify_pending', {
+            pending: pending.length,
+            cached: papers.size - pending.length,
+            total: papers.size,
+        });
         const limit = pLimit(Math.max(1, cfg.source.concurrency ?? 4));
 
         const classifyMs = Date.now();
@@ -462,6 +467,17 @@ export interface WebBuildResult {
     paperCount: number;
 }
 
+export interface WebBuildAllResult {
+    /** Weeks successfully (re)built, sorted. */
+    weeks: string[];
+    /** Written .json data files (one per category) + manifests, deduped. */
+    files: string[];
+    categories: string[];
+    paperCount: number;
+    /** Weeks skipped because they have no buildable cached data. */
+    skipped: string[];
+}
+
 /**
  * Offline backfill of the static-site data for one week: rebuilds the
  * documents from cached papers + classifications (like preview) and writes
@@ -496,6 +512,47 @@ export async function buildWebDigests(
         files,
         categories: preview.documents.map((document) => document.categoryId),
         paperCount: preview.documents[0]?.candidateCount ?? 0,
+    };
+}
+
+/**
+ * Offline backfill for every cached week (the default for `web build`):
+ * discovers the weeks from stored papers and rebuilds each one via
+ * `buildWebDigests`. Weeks without buildable data (e.g. classifications were
+ * cleared) are skipped and reported instead of failing the whole backfill.
+ * No network, no agent.
+ */
+export async function buildAllWebDigests(root: string, cfg: Config): Promise<WebBuildAllResult> {
+    const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
+    let weeks: string[];
+    try {
+        weeks = store.distinctWeeks();
+    } finally {
+        store.close();
+    }
+    const files = new Set<string>();
+    const categories = new Set<string>();
+    const skipped: string[] = [];
+    let paperCount = 0;
+    for (const week of weeks) {
+        try {
+            const result = await buildWebDigests(root, cfg, week);
+            for (const file of result.files) files.add(file);
+            for (const category of result.categories) categories.add(category);
+            paperCount += result.paperCount;
+        } catch (error) {
+            skipped.push(week);
+            console.error(
+                `web build: skipped ${week}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+    }
+    return {
+        weeks: weeks.filter((week) => !skipped.includes(week)),
+        files: [...files],
+        categories: [...categories].sort(),
+        paperCount,
+        skipped,
     };
 }
 

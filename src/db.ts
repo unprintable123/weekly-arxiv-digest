@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import initSqlJs from 'sql.js';
 import type { ClassificationResult, Paper } from './types.js';
+import { isoWeekOf } from './window.js';
 
 const require = createRequire(import.meta.url);
 const sqlJs: any = await initSqlJs({
@@ -176,6 +177,7 @@ CREATE TABLE IF NOT EXISTS classification_cache (
   model TEXT,
   categories_json TEXT,
   tags_json TEXT,
+  tldr_json TEXT,
   status TEXT,
   created_at TEXT
 );
@@ -249,6 +251,19 @@ export class Store {
       .all(from, to) as any[]).map((row) => this.rowPaper(row));
   }
 
+  /** Sorted ISO week ids (`YYYY-Www`) that have at least one cached paper. */
+  distinctWeeks(): string[] {
+    const rows = this.db
+      .prepare('SELECT published_at FROM papers')
+      .all() as Array<{ published_at: string }>;
+    const weeks = new Set<string>();
+    for (const row of rows) {
+      const week = isoWeekOf(row.published_at);
+      if (week) weeks.add(week);
+    }
+    return [...weeks].sort();
+  }
+
   private rowPaper(row: any): Paper {
     return rowToPaper(row);
   }
@@ -296,12 +311,7 @@ export class Store {
     const row = this.db
       .prepare('SELECT * FROM classification_cache WHERE cache_key=? AND status="ok"')
       .get(key) as any;
-    return (
-      row && {
-        categories: JSON.parse(row.categories_json),
-        tags: JSON.parse(row.tags_json),
-      }
-    );
+    return this.rowClassification(row);
   }
 
   /**
@@ -317,12 +327,28 @@ export class Store {
       : this.db
         .prepare('SELECT * FROM classification_cache WHERE arxiv_id=? AND content_hash=? AND status="ok" ORDER BY created_at DESC LIMIT 1')
         .get(id, contentHash);
-    return (
-      row && {
-        categories: JSON.parse(row.categories_json),
-        tags: JSON.parse(row.tags_json),
-      }
-    );
+    return this.rowClassification(row);
+  }
+
+  /**
+   * Convert a classification row to the domain result. Rows written before the
+   * `tldr_json` column existed (or with an empty tldr) are treated as a cache
+   * miss so stale entries never produce a paper card without a TLDR.
+   */
+  private rowClassification(row: any): ClassificationResult | undefined {
+    if (!row || typeof row.tldr_json !== 'string') return undefined;
+    let tldr: string;
+    try {
+      tldr = JSON.parse(row.tldr_json);
+    } catch {
+      return undefined;
+    }
+    if (typeof tldr !== 'string' || !tldr.trim()) return undefined;
+    return {
+      categories: JSON.parse(row.categories_json),
+      tags: JSON.parse(row.tags_json),
+      tldr,
+    };
   }
 
   saveClassification(
@@ -332,7 +358,7 @@ export class Store {
     r: ClassificationResult,
   ): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?)')
+      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?,?)')
       .run(
         key,
         p.arxivId,
@@ -340,6 +366,7 @@ export class Store {
         model,
         JSON.stringify(r.categories),
         JSON.stringify(r.tags),
+        JSON.stringify(r.tldr),
         'ok',
         new Date().toISOString(),
       );

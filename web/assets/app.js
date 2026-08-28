@@ -117,7 +117,8 @@ function matchesSearch(text) {
 }
 
 /**
- * One paper card. Field order and content match the Markdown digest.
+ * One paper card. Field order matches the Markdown digest except the TLDR,
+ * which the web card shows directly above the abstract (below the meta block).
  * @param {object} paper weekly JSON paper entry
  */
 function renderCard(paper) {
@@ -141,6 +142,18 @@ function renderCard(paper) {
         title,
         ...(tags.length ? [element('div', ['flex', 'flex-wrap', 'gap-1'], tags)] : []),
     ]);
+
+    const tldr = paper.classification.tldr;
+    const tldrBlock = tldr
+        ? element(
+            'div',
+            ['mt-3', 'rounded-lg', 'bg-indigo-50', 'py-2', 'text-sm', 'leading-relaxed', 'text-slate-700', 'dark:bg-indigo-950/40', 'dark:text-slate-200'],
+            [
+                element('span', ['font-semibold', 'text-indigo-700', 'dark:text-indigo-300'], ['TLDR: ']),
+                document.createTextNode(tldr),
+            ],
+        )
+        : null;
 
     const abstract = element(
         'p',
@@ -192,7 +205,7 @@ function renderCard(paper) {
         element('div', [], [element('span', ['font-semibold', 'text-slate-600', 'dark:text-slate-300'], ['Published: ']), document.createTextNode(String(paper.publishedAt).slice(0, 10))]),
     ]);
 
-    card.append(header, meta, element('div', ['mt-3', 'border-t', 'border-slate-100', 'pt-3', 'dark:border-slate-800'], [abstract, toggleButton]));
+    card.append(header, meta, tldrBlock, element('div', ['mt-3', 'border-t', 'border-slate-100', 'pt-3', 'dark:border-slate-800'], [abstract, toggleButton]));
     return card;
 }
 
@@ -237,7 +250,7 @@ function resetPanels() {
 function renderDocument(webDocument) {
     resetPanels();
     const papers = (webDocument.papers ?? []).filter((paper) =>
-        matchesSearch(`${paper.title} ${paper.authors.join(' ')} ${paper.abstractEn}`),
+        matchesSearch(`${paper.title} ${paper.authors.join(' ')} ${paper.abstractEn} ${paper.classification?.tldr ?? ''}`),
     );
     if (!papers.length) {
         showEmpty(searchPattern ? 'No papers match the filter.' : 'No papers in this category.');

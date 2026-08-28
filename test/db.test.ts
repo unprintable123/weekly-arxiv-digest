@@ -62,6 +62,7 @@ const model = 'test-model';
 const result = (primary: string, secondary?: string): ClassificationResult => ({
     categories: secondary ? [primary, secondary] : [primary],
     tags: ['attention'],
+    tldr: '一句话中文摘要。',
 });
 
 describe('classification cache', () => {
@@ -76,6 +77,7 @@ describe('classification cache', () => {
             const cached = store.getClassification(key);
             expect(cached?.categories).toEqual(['llm-architecture']);
             expect(cached?.tags).toEqual(['attention']);
+            expect(cached?.tldr).toBe('一句话中文摘要。');
             expect(cached).not.toHaveProperty('raw');
             expect(store.latestClassification('2401.01234')?.categories).toEqual(['llm-architecture']);
             // The content-hash filter keeps the row reusable for the same paper
@@ -97,6 +99,26 @@ describe('classification cache', () => {
             // only invalidation signal, and different keys stay independent.
             store.saveClassification('key-c', paper('2401.01234'), model, result('other'));
             expect(store.getClassification('key-c')?.categories).toEqual(['other']);
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('treats classification rows without a tldr as a cache miss', () => {
+        const { store, cleanup } = makeStore();
+        try {
+            store.savePaper(paper('2401.01234'));
+            store.saveClassification('k1', paper('2401.01234'), model, result('llm-architecture'));
+            expect(store.getClassification('k1')).toBeDefined();
+            expect(store.latestClassification('2401.01234', 'hash-2401.01234')).toBeDefined();
+            // Simulate a row written before the tldr_json column existed: the
+            // row is no longer a valid classification and must be re-derived.
+            store.db.exec("UPDATE classification_cache SET tldr_json='' WHERE cache_key='k1'");
+            expect(store.getClassification('k1')).toBeUndefined();
+            expect(store.latestClassification('2401.01234', 'hash-2401.01234')).toBeUndefined();
+            // The same row is again usable once a tldr is stored.
+            store.saveClassification('k1', paper('2401.01234'), model, result('llm-architecture'));
+            expect(store.getClassification('k1')?.tldr).toBe('一句话中文摘要。');
         } finally {
             cleanup();
         }
@@ -141,6 +163,27 @@ describe('paper window queries', () => {
             cleanup();
         }
     });
+
+    it('lists distinct ISO weeks, sorted, with no duplicate week per group', () => {
+        const { store, cleanup } = makeStore();
+        try {
+            store.savePaper(paper('2401.01234', '2024-01-01T00:00:00.000Z')); // 2024-W01
+            store.savePaper(paper('2401.01235', '2024-01-03T00:00:00.000Z')); // 2024-W01 (dup)
+            store.savePaper(paper('2401.01236', '2024-01-10T00:00:00.000Z')); // 2024-W02
+            store.savePaper(paper('2401.01237', '2024-12-30T00:00:00.000Z')); // 2025-W01
+
+            expect(store.distinctWeeks()).toEqual(['2024-W01', '2024-W02', '2025-W01']);
+        } finally {
+            cleanup();
+        }
+        // Empty store yields an empty list.
+        const empty = makeStore();
+        try {
+            expect(empty.store.distinctWeeks()).toEqual([]);
+        } finally {
+            empty.cleanup();
+        }
+    });
 });
 
 describe('meta table', () => {
@@ -163,7 +206,7 @@ describe('meta table', () => {
 });
 
 describe('stats and prune', () => {
-    it('reports fetch/classification counts and prunes only stale entries', () => {
+    it('reports fetch/classification counts and prunes only stale entries', async () => {
         const { store, cleanup } = makeStore();
         try {
             store.savePaper(paper('2401.01234'));
@@ -183,6 +226,10 @@ describe('stats and prune', () => {
             expect(store.prune(3650)).toBe(0);
             expect(store.getClassification('k1')).toBeDefined();
 
+            // Let at least one millisecond pass so the stored timestamps are
+            // strictly older than "now" when pruning with age=0 (avoids a
+            // same-millisecond race that made this assertion flaky).
+            await new Promise((resolve) => setTimeout(resolve, 5));
             // age=0 prunes everything recorded before "now".
             expect(store.prune(0)).toBeGreaterThanOrEqual(2);
             expect(store.getClassification('k1')).toBeUndefined();

@@ -6,7 +6,7 @@ import { loadConfig } from './config.js';
 import { Store } from './db.js';
 import { Logger } from './log.js';
 import { ChatCompletionClient } from './llm.js';
-import { previewDigest, runDigest, buildWebDigests } from './pipeline.js';
+import { previewDigest, runDigest, buildWebDigests, buildAllWebDigests } from './pipeline.js';
 import { weekWindow } from './window.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -34,7 +34,7 @@ async function main(): Promise<void> {
             'pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force] [--dry-run] [--debug] [--trace FILE]\n' +
             'pnpm digest preview --week YYYY-Www [--category TOPIC_ID] [--config config.yaml]\n' +
             'pnpm digest cache stats|prune [--older-than DAYS]|clear-classifications [--older-than DAYS]\n' +
-            'pnpm digest web build --week YYYY-Www [--config config.yaml]',
+            'pnpm digest web build [--week YYYY-Www] [--config config.yaml]',
         );
         return;
     }
@@ -60,7 +60,7 @@ async function main(): Promise<void> {
         );
         console.log(
             JSON.stringify({
-                files: result.files,
+                files_written: result.files.length,
                 categories: result.documents.map((document) => document.categoryId),
                 stats: {
                     candidates: result.documents[0]?.candidateCount ?? 0,
@@ -107,16 +107,21 @@ async function main(): Promise<void> {
     }
 
     if (command === 'web') {
-        // Offline backfill of the static-site JSON feed for one week from the
-        // cached papers and classifications (no network, no agent calls).
-        if (args[1] !== 'build') throw new Error('Usage: web build --week YYYY-Www');
+        // Offline backfill of the static-site JSON feed from the cached papers
+        // and classifications (no network, no agent calls). Defaults to every
+        // cached week; `--week` limits the backfill to a single week.
+        if (args[1] !== 'build') throw new Error('Usage: web build [--week YYYY-Www]');
         const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
-        const result = await buildWebDigests(root, cfg, value('--week') || '');
+        const week = value('--week');
+        const result = week
+            ? { weeks: [week], skipped: [] as string[], ...(await buildWebDigests(root, cfg, week)) }
+            : await buildAllWebDigests(root, cfg);
         console.log(
             JSON.stringify({
-                week: result.week,
+                weeks: result.weeks,
                 categories: result.categories,
-                files: result.files,
+                files_written: result.files.length,
+                skipped: result.skipped,
                 stats: { candidates: result.paperCount, candidates_included: result.paperCount },
             }),
         );
