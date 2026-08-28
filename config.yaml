@@ -1,6 +1,6 @@
 # Weekly arXiv digest example configuration.
 # Classification topics live in TOPICS.yaml; this file only controls crawling,
-# the time window, output locations, and the local pi agent connection.
+# the time window, output locations, and the LLM classification connection.
 # Provider credentials are read from environment variables, never from YAML.
 
 source:
@@ -26,11 +26,12 @@ output:
   # One Markdown file per week and per classification category.
   filename: "weekly-{week}-{category}.md"
 
-pi_agent:
-  # Editorial worker. The implementation imports the pi agent from this
-  # project's local node_modules. Classification uses a fixed, versioned
-  # prompt with the controlled TOPICS.yaml vocabulary only.
-  provider: "paratera"
+llm:
+  # Classification worker: an OpenAI-compatible chat completion endpoint.
+  # The endpoint and API key come from BASE_URL / API_KEY in the environment
+  # (.env is loaded automatically); base_url here overrides the env endpoint.
+  # Classification uses a fixed, versioned prompt with the controlled
+  # TOPICS.yaml vocabulary only.
   model: "GLM-5.3-Flash"
   timeout_ms: 120000
   max_retries: 2

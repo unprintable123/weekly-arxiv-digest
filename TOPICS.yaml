@@ -21,6 +21,7 @@ precedence:
   - rag > llm-knowledge
   - reasoning-rl > llm-reasoning
   - ir-evaluation > llm-evaluation
+  - llm-architecture > llm-efficiency
   # multimodal-generation wins over diffusion-lm for image/video papers
   - multimodal-generation > diffusion-lm
   # llm-physics wins over llm-training for scaling and training-dynamics theory
@@ -32,8 +33,8 @@ groups:
     topics:
       - id: llm-architecture
         name: 大模型架构
-        description: Transformer 变体、注意力、MoE、状态空间、残差和归一化等结构创新；不包含单纯训练技巧。
-        tags: [transformer, attention, state-space-model, mixture-of-experts, recurrent-model, positional-encoding]
+        description: Transformer 变体、注意力、MoE、状态空间、残差和归一化等结构创新；不包含单纯训练技巧，如果在优化模型效率的同时引入了新架构（例如sparse attention）也算作architecture。
+        tags: [transformer, attention, state-space-model, mixture-of-experts, recurrent-model, positional-encoding, sparse-attention]
       - id: llm-training
         name: 大模型训练与微调
         description: 预训练目标、SFT、参数高效微调、优化策略和训练配方；理论规律优先使用 llm-physics。

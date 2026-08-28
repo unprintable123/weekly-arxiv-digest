@@ -1,11 +1,13 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     buildClassificationPrompt,
+    ChatCompletionClient,
     classifyPaper,
     CLASSIFICATION_PROMPT_VERSION,
+    LLM_CLIENT_VERSION,
     normalizeClassification,
-} from '../src/pi.js';
+} from '../src/llm.js';
 import { parseTaxonomy } from '../src/topics.js';
 import type { Paper } from '../src/types.js';
 import { repoTopicsPath } from './helpers.js';
@@ -25,7 +27,7 @@ const paper = (overrides: Partial<Paper> = {}): Paper => ({
     ...overrides,
 });
 
-const agent = { provider: 'test', model: 'test-model', timeout_ms: 1000, max_retries: 2 };
+const agent = { model: 'test-model', timeout_ms: 1000, max_retries: 2 };
 
 describe('buildClassificationPrompt', () => {
     it('embeds title, abstract and taxonomy catalog only', () => {
@@ -116,6 +118,93 @@ describe('normalizeClassification', () => {
     });
 });
 
+describe('ChatCompletionClient', () => {
+    const env = { ...process.env };
+
+    afterEach(() => {
+        process.env = { ...env };
+        vi.restoreAllMocks();
+    });
+
+    const completion = (content: string): unknown => ({
+        choices: [{ message: { role: 'assistant', content } }],
+    });
+
+    it('posts the prompt to the configured endpoint and returns the message content', async () => {
+        process.env.BASE_URL = 'https://llm.example/v1/';
+        process.env.API_KEY = 'secret-key';
+        const fetchMock = vi.fn(async () =>
+            new Response(JSON.stringify(completion('{"categories": ["rag"]}')), { status: 200 }),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        const client = new ChatCompletionClient();
+        const raw = await client.complete('the prompt', { model: 'test-model', timeoutMs: 1000 });
+        expect(raw).toBe('{"categories": ["rag"]}');
+
+        const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+        expect(url).toBe('https://llm.example/v1/chat/completions');
+        expect(init.method).toBe('POST');
+        expect((init.headers as Record<string, string>).authorization).toBe('Bearer secret-key');
+        const body = JSON.parse(String(init.body)) as { model: string; messages: { role: string; content: string }[] };
+        expect(body.model).toBe('test-model');
+        expect(body.messages).toEqual([{ role: 'user', content: 'the prompt' }]);
+    });
+
+    it('prefers config base_url over the environment endpoint', async () => {
+        process.env.BASE_URL = 'https://env.example/v1';
+        process.env.API_KEY = 'secret-key';
+        const fetchMock = vi.fn(async () =>
+            new Response(JSON.stringify(completion('ok')), { status: 200 }),
+        );
+        vi.stubGlobal('fetch', fetchMock);
+
+        await new ChatCompletionClient({ baseUrl: 'https://config.example/v1' }).complete('p', {
+            model: 'm',
+            timeoutMs: 1000,
+        });
+        expect(fetchMock.mock.calls[0][0]).toBe('https://config.example/v1/chat/completions');
+    });
+
+    it('fails fast when the endpoint or key is missing', async () => {
+        delete process.env.BASE_URL;
+        delete process.env.API_KEY;
+        const fetchMock = vi.fn();
+        vi.stubGlobal('fetch', fetchMock);
+
+        await expect(
+            new ChatCompletionClient().complete('p', { model: 'm', timeoutMs: 1000 }),
+        ).rejects.toThrow(/BASE_URL/);
+        await expect(
+            new ChatCompletionClient({ baseUrl: 'https://config.example/v1' }).complete('p', {
+                model: 'm',
+                timeoutMs: 1000,
+            }),
+        ).rejects.toThrow(/API_KEY/);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('surfaces HTTP errors without leaking the response body beyond a prefix', async () => {
+        process.env.BASE_URL = 'https://llm.example/v1';
+        process.env.API_KEY = 'secret-key';
+        vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"boom"}', { status: 401 })));
+
+        await expect(
+            new ChatCompletionClient().complete('p', { model: 'm', timeoutMs: 1000 }),
+        ).rejects.toThrow(/HTTP 401/);
+    });
+
+    it('rejects malformed completion payloads', async () => {
+        process.env.BASE_URL = 'https://llm.example/v1';
+        process.env.API_KEY = 'secret-key';
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ choices: [] }), { status: 200 })));
+
+        await expect(
+            new ChatCompletionClient().complete('p', { model: 'm', timeoutMs: 1000 }),
+        ).rejects.toThrow();
+    });
+});
+
 describe('classifyPaper', () => {
     it('sends the fixed prompt and returns the validated classification with raw output', async () => {
         const invoker = {
@@ -128,7 +217,7 @@ describe('classifyPaper', () => {
         expect(invoker.complete).toHaveBeenCalledTimes(1);
         const [prompt, options] = invoker.complete.mock.calls[0];
         expect(prompt).toContain(paper().title);
-        expect(options).toEqual({ provider: 'test', model: 'test-model', timeoutMs: 1000 });
+        expect(options).toEqual({ model: 'test-model', timeoutMs: 1000 });
     });
 
     it('parses fenced JSON output', async () => {
@@ -158,5 +247,9 @@ describe('classifyPaper', () => {
         const result = await classifyPaper(paper(), taxonomy, agent, invoker);
         expect(result.categories).toEqual(['rag']);
         expect(invoker.complete).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses a stable client version for cache invalidation', () => {
+        expect(LLM_CLIENT_VERSION).toBe('chat-completions-v1');
     });
 });

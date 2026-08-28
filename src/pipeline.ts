@@ -7,11 +7,11 @@ import { createCrawler, type PaperCrawler } from './crawler.js';
 import { rowToPaper, Store } from './db.js';
 import { Logger, elapsed } from './log.js';
 import {
-    agentVersion,
     classifyPaper,
     CLASSIFICATION_PROMPT_VERSION,
-    type PiInvoker,
-} from './pi.js';
+    LLM_CLIENT_VERSION,
+    type LlmInvoker,
+} from './llm.js';
 import { MarkdownRenderer } from './renderer.js';
 import type { ClassifiedPaper, DigestDocument, Paper, Window } from './types.js';
 import { hash } from './util.js';
@@ -19,7 +19,7 @@ import { hash } from './util.js';
 export interface RunOptions {
     root: string;
     force?: boolean;
-    invoker?: PiInvoker;
+    invoker?: LlmInvoker;
     crawler?: PaperCrawler;
     logger?: Logger;
     /** run the whole pipeline but skip writing the digest files */
@@ -41,29 +41,28 @@ export function configHash(cfg: Config): string {
         source: cfg.source,
         window: cfg.window,
         output: cfg.output,
-        pi_agent: cfg.pi_agent,
+        llm: cfg.llm,
         categories: cfg.resolvedCategories,
     });
 }
 
 /**
  * Classification cache key: any change to paper content, taxonomy, prompt
- * version, agent package, provider, or model invalidates the old entries.
+ * version, LLM client, model, or endpoint invalidates the old entries.
  */
 export function classificationCacheKey(
     paper: Paper,
     cfg: Config,
     taxonomyHash: string,
-    agentV: string,
 ): string {
     return hash({
         id: paper.arxivId,
         content: paper.contentHash,
         taxonomy: taxonomyHash,
         promptVersion: CLASSIFICATION_PROMPT_VERSION,
-        agentVersion: agentV,
-        provider: cfg.pi_agent.provider,
-        model: cfg.pi_agent.model,
+        clientVersion: LLM_CLIENT_VERSION,
+        model: cfg.llm.model,
+        baseUrl: cfg.llm.base_url ?? '',
     });
 }
 
@@ -87,7 +86,6 @@ export async function runDigest(
     const logger = opts.logger ?? new Logger({ runId });
     const invoker = opts.invoker;
     const taxonomy = cfg.topics;
-    const agentV = agentVersion();
 
     store.startRun({
         runId,
@@ -161,7 +159,7 @@ export async function runDigest(
         const tasks = [...papers.values()].map((paper) =>
             limit(async (): Promise<ClassifiedPaper | undefined> => {
                 store.savePaper(paper);
-                const key = classificationCacheKey(paper, cfg, taxonomy.hash, agentV);
+                const key = classificationCacheKey(paper, cfg, taxonomy.hash);
                 classificationKeys.set(paper.arxivId, key);
                 const classifyMs = Date.now();
                 let classification = opts.force ? undefined : store.getClassification(key);
@@ -173,9 +171,9 @@ export async function runDigest(
                         elapsed_ms: elapsed(classifyMs),
                     });
                 } else {
-                    if (!invoker) throw new Error('No PiInvoker configured');
+                    if (!invoker) throw new Error('No LlmInvoker configured');
                     try {
-                        classification = await classifyPaper(paper, taxonomy, cfg.pi_agent, invoker);
+                        classification = await classifyPaper(paper, taxonomy, cfg.llm, invoker, logger);
                         newClassifications += 1;
                         store.saveClassification(
                             key,
@@ -183,9 +181,9 @@ export async function runDigest(
                             {
                                 taxonomyHash: taxonomy.hash,
                                 promptVersion: CLASSIFICATION_PROMPT_VERSION,
-                                agentVersion: agentV,
-                                provider: cfg.pi_agent.provider,
-                                model: cfg.pi_agent.model,
+                                agentVersion: LLM_CLIENT_VERSION,
+                                provider: cfg.llm.base_url ?? '',
+                                model: cfg.llm.model,
                             },
                             classification,
                         );
@@ -199,7 +197,7 @@ export async function runDigest(
                         // A single classification failure must not lose the rest
                         // of the run, but the run still reports the error.
                         errors += 1;
-                        store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.pi_agent.max_retries);
+                        store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.llm.max_retries);
                         store.addRunPaper(runId, paper.arxivId, false, 'classify-error', 0, key);
                         logger.warn('agent_error', {
                             arxiv_id: paper.arxivId,
@@ -372,7 +370,7 @@ export type RetryStage = 'fetch' | 'classify';
 
 export interface RetryOptions {
     root: string;
-    invoker?: PiInvoker;
+    invoker?: LlmInvoker;
     crawler?: PaperCrawler;
     logger?: Logger;
 }
@@ -461,10 +459,9 @@ export async function retryRun(
         }
 
         const invoker = opts.invoker;
-        if (!invoker) throw new Error(`No PiInvoker configured for retry --stage ${stage}`);
+        if (!invoker) throw new Error(`No LlmInvoker configured for retry --stage ${stage}`);
 
         const taxonomy = cfg.topics;
-        const agentV = agentVersion();
         const failed = new Set(
             store.agentErrorsForRun(targetRunId, 'classify').map((entry) => entry.arxiv_id as string),
         );
@@ -476,17 +473,17 @@ export async function retryRun(
         let failedCount = 0;
         for (const paper of targets) {
             try {
-                const classification = await classifyPaper(paper, taxonomy, cfg.pi_agent, invoker);
-                const key = classificationCacheKey(paper, cfg, taxonomy.hash, agentV);
+                const classification = await classifyPaper(paper, taxonomy, cfg.llm, invoker, logger);
+                const key = classificationCacheKey(paper, cfg, taxonomy.hash);
                 store.saveClassification(
                     key,
                     paper,
                     {
                         taxonomyHash: taxonomy.hash,
                         promptVersion: CLASSIFICATION_PROMPT_VERSION,
-                        agentVersion: agentV,
-                        provider: cfg.pi_agent.provider,
-                        model: cfg.pi_agent.model,
+                        agentVersion: LLM_CLIENT_VERSION,
+                        provider: cfg.llm.base_url ?? '',
+                        model: cfg.llm.model,
                     },
                     classification,
                 );
@@ -494,7 +491,7 @@ export async function retryRun(
                 logger.info('retry_item', { stage, arxiv_id: paper.arxivId, ok: true });
             } catch (error) {
                 failedCount += 1;
-                store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.pi_agent.max_retries);
+                store.addAgentError(runId, 'classify', paper.arxivId, error, cfg.llm.max_retries);
                 logger.warn('retry_item', {
                     stage,
                     arxiv_id: paper.arxivId,

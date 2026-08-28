@@ -4,7 +4,6 @@ import { Logger } from '../src/log.js';
 import { fixture, makeStore, routeContains, stubFetch, week } from './helpers.js';
 
 const listHtml = fixture('papers-cool-list.html');
-const detailHtml = fixture('papers-cool-detail.html');
 const arxivAbsHtml = fixture('arxiv-abs.html');
 const atomXml = fixture('arxiv-atom.xml');
 
@@ -25,11 +24,7 @@ describe('PapersCoolCrawler', () => {
             stream: { write: (chunk: string) => { output += chunk; return true; } } as NodeJS.WritableStream,
         });
         const crawler = new PapersCoolCrawler(store, { ...baseOptions, logger });
-        stubFetch([
-            routeContains('/arxiv/cs.LG', listHtml),
-            routeContains('/arxiv/2401.01234', detailHtml),
-            routeContains('/arxiv/2401.01235', detailHtml),
-        ]);
+        stubFetch([routeContains('/arxiv/cs.LG', listHtml)]);
 
         await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
         await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
@@ -37,7 +32,7 @@ describe('PapersCoolCrawler', () => {
         const events = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
         expect(events.some((entry) => entry.event === 'crawl_category_start')).toBe(true);
         expect(events.some((entry) => entry.event === 'crawl_list_page')).toBe(true);
-        expect(events.some((entry) => entry.event === 'crawl_detail_success')).toBe(true);
+        expect(events.some((entry) => entry.event === 'crawl_list_complete')).toBe(true);
         expect(events.some((entry) => entry.event === 'crawl_http_cache_hit')).toBe(true);
         expect(events.some((entry) => entry.event === 'crawl_category_end')).toBe(true);
         expect(output).not.toContain('enriched abstract');
@@ -46,35 +41,39 @@ describe('PapersCoolCrawler', () => {
         cleanup();
     });
 
-    it('parses list items and merges detail page metadata', async () => {
+    it('uses list page metadata without per-paper detail requests', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, baseOptions);
         const { calls } = stubFetch([
             routeContains('/arxiv/cs.LG', listHtml),
-            routeContains('/arxiv/2401.01234', detailHtml),
-            routeContains('/arxiv/2401.01235', detailHtml),
+            // No detail routes: any per-paper request would 404 and fail the test.
         ]);
 
         const result = await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
 
         expect(result.errors).toEqual([]);
-        // 7 days in the window -> 7 list requests, plus 2 detail requests.
+        // No pagination: one list request per day in the window, and nothing else.
         expect(calls.filter((url) => url.includes('/arxiv/cs.LG'))).toHaveLength(7);
-        expect(calls.filter((url) => url.includes('/arxiv/2401.'))).toHaveLength(2);
+        expect(calls.filter((url) => url.includes('/arxiv/2401.'))).toHaveLength(0);
+        // The list request uses the documented `date`/`show` parameters only.
+        const listUrl = calls.find((url) => url.includes('/arxiv/cs.LG'))!;
+        expect(listUrl).toContain('date=2024-01-01');
+        expect(listUrl).toContain('show=');
+        expect(listUrl).not.toContain('page=');
         expect(result.newFetches).toBe(true);
         expect(result.papers).toHaveLength(2);
 
         const paper = result.papers.find((p) => p.arxivId === '2401.01234')!;
         expect(paper).toBeDefined();
         expect(paper.version).toBeUndefined();
-        // Detail page content wins over the list page.
-        expect(paper.title).toBe('Attention Is All You Need: A Study of Scalable Attention (Detailed)');
+        // List page content is used as-is.
+        expect(paper.title).toBe('Attention Is All You Need: A Study of Scalable Attention');
         expect(paper.abstractEn).toBe(
-            'This is the enriched abstract from the detail page, with additional experimental context and ablations.',
+            'We study attention mechanisms and show that a quadratic-complexity core can be replaced by a linear-time variant without loss of quality on standard benchmarks.',
         );
         expect(paper.authors).toEqual(['Alice Example', 'Bob Sample']);
-        expect(paper.categories).toEqual(['cs.LG']);
-        expect(paper.publishedAt).toBe('2024-01-02T00:00:00.000Z');
+        expect(paper.categories).toEqual(['cs.LG', 'cs.AI']);
+        expect(paper.publishedAt).toBe('2024-01-01T00:00:00.000Z');
         expect(paper.detailUrl).toBe('https://arxiv.org/abs/2401.01234');
         expect(paper.sourceUrl).toContain('/arxiv/cs.LG');
         expect(paper.contentHash).toBeTruthy();
@@ -85,11 +84,7 @@ describe('PapersCoolCrawler', () => {
     it('filters papers published outside the half-open window', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, baseOptions);
-        stubFetch([
-            routeContains('/arxiv/cs.LG', listHtml),
-            routeContains('/arxiv/2401.01234', detailHtml),
-            routeContains('/arxiv/2401.01235', detailHtml),
-        ]);
+        stubFetch([routeContains('/arxiv/cs.LG', listHtml)]);
 
         const result = await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
 
@@ -122,7 +117,6 @@ describe('PapersCoolCrawler', () => {
     </body></html>`;
         stubFetch([
             routeContains('/arxiv/cs.LG', page),
-            routeContains('/arxiv/2401.01234v2', detailHtml),
         ]);
 
         const result = await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
@@ -130,13 +124,14 @@ describe('PapersCoolCrawler', () => {
         expect(result.papers).toHaveLength(1);
         expect(result.papers[0].arxivId).toBe('2401.01234');
         expect(result.papers[0].version).toBe('v2');
-        // Detail request used the latest version URL.
+        expect(result.papers[0].title).toBe('New Version Title');
+        expect(result.papers[0].abstractEn).toBe('Abstract v2.');
         expect(result.papers[0].sourceUrl).toBeDefined();
 
         cleanup();
     });
 
-    it('uses the arXiv fallback when the detail page has no abstract', async () => {
+    it('uses the arXiv fallback when the list item has no abstract', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, baseOptions);
         const page = `<!DOCTYPE html><html><body>
@@ -149,7 +144,6 @@ describe('PapersCoolCrawler', () => {
     </body></html>`;
         stubFetch([
             routeContains('/arxiv/cs.LG', page),
-            // No route for the papers.cool detail page -> HTTP 404 recorded.
             routeContains('/abs/2401.01234', arxivAbsHtml),
         ]);
 
@@ -161,8 +155,7 @@ describe('PapersCoolCrawler', () => {
             'This abstract comes from the arXiv fallback page because the papers.cool detail page had no abstract.',
         );
         expect(paper.detailUrl).toBe('https://export.arxiv.org/abs/2401.01234');
-        // The failed detail attempt is surfaced, not silently swallowed.
-        expect(result.errors.some((e) => e.stage === 'detail' && e.arxivId === '2401.01234')).toBe(true);
+        expect(result.errors).toEqual([]);
 
         cleanup();
     });
@@ -213,11 +206,7 @@ describe('PapersCoolCrawler', () => {
     it('serves repeat fetches from cache with no additional network traffic', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, baseOptions);
-        const { calls } = stubFetch([
-            routeContains('/arxiv/cs.LG', listHtml),
-            routeContains('/arxiv/2401.01234', detailHtml),
-            routeContains('/arxiv/2401.01235', detailHtml),
-        ]);
+        const { calls } = stubFetch([routeContains('/arxiv/cs.LG', listHtml)]);
 
         const first = await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
         const networkCalls = calls.length;
@@ -234,11 +223,7 @@ describe('PapersCoolCrawler', () => {
     it('force option bypasses the fetch cache', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, { ...baseOptions, force: true });
-        const { calls } = stubFetch([
-            routeContains('/arxiv/cs.LG', listHtml),
-            routeContains('/arxiv/2401.01234', detailHtml),
-            routeContains('/arxiv/2401.01235', detailHtml),
-        ]);
+        const { calls } = stubFetch([routeContains('/arxiv/cs.LG', listHtml)]);
 
         await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
         const afterFirst = calls.length;
@@ -250,7 +235,7 @@ describe('PapersCoolCrawler', () => {
         cleanup();
     });
 
-    it('handles pagination across multiple list pages', async () => {
+    it('fetches the full daily list in a single request without pagination', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, { ...baseOptions, pageSize: 2 });
         const page = (ids: string[]) => `<!DOCTYPE html><html><body>
@@ -266,21 +251,21 @@ describe('PapersCoolCrawler', () => {
                 )
                 .join('')}
     </body></html>`;
-        const detail = (id: string) =>
-            `<!DOCTYPE html><html><body><h1 class="title">Paper ${id} Detailed</h1><p class="summary">Detailed abstract for ${id}.</p><span class="date-data">2024-01-01</span></body></html>`;
         const ids = ['2401.00001', '2401.00002', '2401.00003'];
-        stubFetch([
-            routeContains('page=1', page(['2401.00001', '2401.00002'])),
-            routeContains('page=2', page(['2401.00003'])),
-            ...ids.map((id) => ({ match: (url: string) => url.endsWith(`/arxiv/${id}`), body: detail(id) })),
+        const { calls } = stubFetch([
+            // The endpoint has no `page` parameter: one request returns the whole day.
+            routeContains('/arxiv/cs.LG', page(ids)),
         ]);
 
         const result = await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-02'));
 
         const papers = [...result.papers].sort((a, b) => a.arxivId.localeCompare(b.arxivId));
         expect(papers.map((p) => p.arxivId)).toEqual(['2401.00001', '2401.00002', '2401.00003']);
-        expect(papers[0].title).toBe('Paper 2401.00001 Detailed');
+        expect(papers[0].title).toBe('Paper 2401.00001');
         expect(result.errors).toEqual([]);
+        // Exactly one list request for the single-day window; no page parameter.
+        expect(calls.filter((url) => url.includes('/arxiv/cs.LG'))).toHaveLength(1);
+        expect(calls.find((url) => url.includes('/arxiv/cs.LG'))).not.toContain('page=');
 
         cleanup();
     });
@@ -288,11 +273,7 @@ describe('PapersCoolCrawler', () => {
     it('caps candidates with maxPapers deterministically', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, { ...baseOptions, maxPapers: 1 });
-        stubFetch([
-            routeContains('/arxiv/cs.LG', listHtml),
-            routeContains('/arxiv/2401.01234', detailHtml),
-            routeContains('/arxiv/2401.01235', detailHtml),
-        ]);
+        stubFetch([routeContains('/arxiv/cs.LG', listHtml)]);
 
         const result = await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
 
@@ -303,44 +284,45 @@ describe('PapersCoolCrawler', () => {
         cleanup();
     });
 
-    it('runs detail fetching with bounded concurrency', async () => {
+    it('runs fallback fetching with bounded concurrency', async () => {
         const { store, cleanup } = makeStore();
         const crawler = new PapersCoolCrawler(store, { ...baseOptions, concurrency: 2, delay: 0 });
         let active = 0;
         let peak = 0;
-        stubFetch([
-            routeContains('/arxiv/cs.LG', listHtml),
-            {
-                match: (url: string) => url.includes('/arxiv/2401.'),
-                body: detailHtml,
-                delayMs: 20,
-            },
-            {
-                match: () => false,
-                body: '',
-            },
-        ]);
-        // Re-stub with an active-counter wrapper around the detail route.
+        const page = `<!DOCTYPE html><html><body>
+      <div class="panel paper" id="2401.01234">
+        <h2 class="title"><a class="title-link" href="/arxiv/2401.01234">Fallback Paper A</a></h2>
+        <p class="date"><span class="date-data">2024-01-01</span></p>
+        <p class="authors"><a class="author" href="/a/a">Alice</a></p>
+        <p class="subjects"><a href="/cat/cs.LG">cs.LG</a></p>
+      </div>
+      <div class="panel paper" id="2401.01235">
+        <h2 class="title"><a class="title-link" href="/arxiv/2401.01235">Fallback Paper B</a></h2>
+        <p class="date"><span class="date-data">2024-01-01</span></p>
+        <p class="authors"><a class="author" href="/a/a">Bob</a></p>
+        <p class="subjects"><a href="/cat/cs.LG">cs.LG</a></p>
+      </div>
+    </body></html>`;
         vi.stubGlobal(
             'fetch',
             vi.fn(async (input: RequestInfo | URL) => {
                 const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
-                if (url.includes('/arxiv/2401.')) {
+                if (url.includes('/abs/2401.')) {
                     active += 1;
                     peak = Math.max(peak, active);
                     await new Promise((resolve) => setTimeout(resolve, 20));
-                    const response = new Response(detailHtml, { status: 200 });
+                    const response = new Response(arxivAbsHtml, { status: 200 });
                     active -= 1;
                     return response;
                 }
-                return new Response(listHtml, { status: 200 });
+                return new Response(page, { status: 200 });
             }),
         );
 
         const result = await crawler.fetchCategory('cs.LG', ...week('2024-01-01', '2024-01-08'));
 
         expect(result.papers).toHaveLength(2);
-        // With concurrency=2, at most 2 detail requests run at the same time.
+        // With concurrency=2, at most 2 fallback requests run at the same time.
         expect(peak).toBeLessThanOrEqual(2);
 
         cleanup();

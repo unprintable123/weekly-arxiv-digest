@@ -24,7 +24,7 @@ describe('loadConfig', () => {
         expect(cfg.resolvedCategories).toEqual(['cs.LG']);
         expect(cfg.output.filename).toBe('weekly-{week}-{category}.md');
         expect(cfg.output.directory).toBe('digests');
-        expect(cfg.pi_agent.max_retries).toBe(2);
+        expect(cfg.llm.max_retries).toBe(2);
         expect(cfg.window.timezone).toBe('UTC');
         expect(cfg.topics.topics.other).toBeDefined();
         expect(Object.keys(cfg.topics.topics).length).toBeGreaterThan(0);
@@ -36,7 +36,10 @@ describe('loadConfig', () => {
         await expect(load(`${baseYaml}\nthreshold: 7\n`)).rejects.toThrow(/threshold/);
         await expect(load(`${baseYaml}\ninterest: llm papers\n`)).rejects.toThrow(/interest/);
         await expect(load(`${baseYaml}\noutput:\n  language: zh-CN\n`)).rejects.toThrow(/language/);
-        await expect(load(`${baseYaml}\npi_agent:\n  instructions: do X\n`)).rejects.toThrow(/instructions/);
+        // pi_agent is now an entirely unknown top-level key.
+        await expect(load(`${baseYaml}\npi_agent:\n  provider: anthropic\n`)).rejects.toThrow(/pi_agent/);
+        await expect(load(`${baseYaml}\nllm:\n  instructions: do X\n`)).rejects.toThrow(/instructions/);
+        await expect(load(`${baseYaml}\nllm:\n  api_key: sk-123\n`)).rejects.toThrow(/api_key/);
         await expect(load(`${baseYaml}\ntopic: Computer Science\n`)).rejects.toThrow(/topic/);
     });
 

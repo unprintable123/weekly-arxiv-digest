@@ -19,7 +19,7 @@ const timezoneSchema = z
   );
 
 // strictObject keeps legacy fields (threshold, interest, output.language,
-// pi_agent.instructions, topic) from being silently ignored.
+// pi_agent, llm.instructions, topic) from being silently ignored.
 const schema = z.strictObject({
   categories: z.array(z.string()).optional(),
   source: z
@@ -61,15 +61,14 @@ const schema = z.strictObject({
       directory: 'digests',
       filename: 'weekly-{week}-{category}.md',
     }),
-  pi_agent: z
+  llm: z
     .strictObject({
-      provider: z.string().default('anthropic'),
-      model: z.string().default('configured-model-id'),
+      base_url: z.string().url().optional(),
+      model: z.string().min(1).default('configured-model-id'),
       timeout_ms: z.number().int().positive().default(120000),
       max_retries: z.number().int().nonnegative().default(2),
     })
     .default({
-      provider: 'anthropic',
       model: 'configured-model-id',
       timeout_ms: 120000,
       max_retries: 2,
@@ -91,7 +90,7 @@ const categoryMap: Record<string, string> = {
 /**
  * Load and validate the YAML config plus the sibling TOPICS.yaml taxonomy.
  * Both must parse before anything else happens; there is no interest,
- * threshold, translation, or custom-instructions surface anymore.
+ * threshold, translation, custom-instructions, or pi-agent surface anymore.
  */
 export async function loadConfig(
   path: string,

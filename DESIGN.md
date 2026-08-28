@@ -2,7 +2,7 @@
 
 ## 1. 目标与范围
 
-本项目是一个 Node.js + TypeScript 命令行 agent：按周从 papers.cool（可选 arXiv API）收集论文，使用本地 pi agent 按 `TOPICS.yaml` 的受控词表分类，最后为每个分类生成 Markdown digest。
+本项目是一个 Node.js + TypeScript 命令行 agent：按周从 papers.cool（可选 arXiv API）收集论文，通过 OpenAI 兼容的 chat completion API 按 `TOPICS.yaml` 的受控词表分类，最后为每个分类生成 Markdown digest。
 
 首版默认关注 `cs.LG`、`cs.CL`、`cs.AI`，来源类别和周窗口均由 YAML 配置控制。论文元数据和英文摘要始终来自抓取源；LLM 只负责分类和可选 tag，不负责相关性评分，也不负责摘要翻译。
 
@@ -14,14 +14,14 @@
 
 - Node.js `>=22.19.0`、pnpm `9.15.0`、严格 TypeScript、ESM、`tsx` 和 `tsc`。
 - `yaml` + `zod` 负责配置和 agent JSON 校验，`cheerio` 负责 HTML/Atom 解析，`p-limit` 控制并发，`sql.js` 提供单文件 SQLite 缓存。
-- `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 和 `@earendil-works/pi-coding-agent` 从本地依赖加载。禁止全局 `pi`、`npx`、运行时下载依赖或子进程启动 agent。
+- LLM 分类通过内置的 OpenAI 兼容 chat completion 客户端（`src/llm.ts`，仅用 Node 内置 `fetch`）完成；端点与密钥来自环境变量 `BASE_URL` / `API_KEY`（`.env` 由 CLI 自动加载）。禁止全局 `pi`、`npx`、运行时下载依赖或子进程启动 agent。
 
 源码职责：
 
 - `src/config.ts`：读取 YAML、校验字段和解析来源类别配置。
 - `src/window.ts`：计算 ISO 周窗口，默认最近一个完整周，也支持显式 `--from`/`--to`。
 - `src/crawler.ts`：抓取分类列表和详情页，解析元数据与摘要，处理分页、版本去重、限速、重试和 HTTP 缓存。
-- `src/pi.ts`：创建本地 pi 会话，仅执行分类/tag 请求，并校验受控 JSON 返回值。
+- `src/llm.ts`：通过 chat completion API 执行分类/tag 请求，并校验受控 JSON 返回值。
 - `src/db.ts`：持久化论文、抓取响应、分类结果、运行记录和错误记录。
 - `src/pipeline.ts`：编排收集、分类、排序和输出，保证缓存命中时不重复调用网络或 agent。
 - `src/renderer.ts`：只消费领域对象并渲染 Markdown，不访问网络、数据库或 agent。
@@ -47,14 +47,16 @@ window:
 output:
   directory: digests
   filename: weekly-{week}-{category}.md
-pi_agent:
-  provider: anthropic
+llm:
+  # OpenAI-compatible chat completion endpoint; BASE_URL/API_KEY come from
+  # the environment (.env), base_url here overrides the env endpoint.
+  # base_url: https://llmapi.paratera.com/v1
   model: configured-model-id
   timeout_ms: 120000
   max_retries: 2
 ```
 
-为兼容当前配置，若不存在 `source.categories`，读取顶层 `categories`；自然语言类别可映射为 arXiv ID，也允许直接填写 ID。`pi_agent` 只配置模型连接和重试参数，不提供个人兴趣或自定义 instructions。分类 prompt 必须由代码中的固定模板生成，并通过版本号参与缓存 key。不要再增加 `threshold`、`interest`、`instructions` 或 `output.language` 之类无关字段。配置错误（类别为空、URL 无效、日期无效等）必须在抓取前失败。
+为兼容当前配置，若不存在 `source.categories`，读取顶层 `categories`；自然语言类别可映射为 arXiv ID，也允许直接填写 ID。`llm` 只配置模型连接和重试参数（可选 `base_url` 覆盖环境端点），不提供个人兴趣或自定义 instructions。分类 prompt 必须由代码中的固定模板生成，并通过版本号参与缓存 key。不要再增加 `threshold`、`interest`、`instructions` 或 `output.language` 之类无关字段。配置错误（类别为空、URL 无效、日期无效等）必须在抓取前失败。
 
 `TOPICS.yaml` 是分类候选词表和机器可读 schema。模型应优先使用已有 topic 和其中的常见 tag；无法归入现有 topic 时返回 `other`，新增 topic 只能由人工审核后追加。运行时使用 YAML + Zod 校验该文件并计算稳定 hash，分类缓存和固定 prompt 都必须绑定该 hash。运行结果中的 category 必须是 topic 的稳定 ID 或受控的 `other`，不能让 agent 随意创建顶层类别。
 
@@ -69,7 +71,7 @@ pi_agent:
       |
 抓取详情和摘要（缓存、限速、重试；必要时 arXiv fallback）
       |
-分类缓存命中则复用，否则 pi agent 返回 category + 可选 tag
+分类缓存命中则复用，否则通过 chat completion API 返回 category + 可选 tag
       |
 按 category、发布日期、arXiv ID 稳定排序
       |
@@ -78,13 +80,13 @@ pi_agent:
 
 ### 4.1 收集论文
 
-列表页用于发现，详情页用于补全标题、作者、分类、发布时间和摘要。papers.cool 缺少摘要时可以按 arXiv ID 请求摘要页作为 fallback；两者都失败时记录抓取错误并跳过该论文，不阻塞其他类别。
+列表页用于发现，并直接提供标题、作者、分类、发布时间和摘要；papers.cool 抓取器不得为每篇论文再请求详情页。仅当列表项缺少摘要时，才按 arXiv ID 请求摘要页作为 fallback；fallback 也失败时记录抓取错误并跳过该论文，不阻塞其他类别。
 
 抓取器必须处理分页、相对链接、HTML 实体、时区、撤稿和版本号。同一 arXiv ID 的多个版本只保留最新版本。展示字段保留原文；规范化标题/摘要只用于去重和缓存指纹。任何请求都不得指向 PDF URL。
 
 ### 4.2 分类与 tag
 
-分类 prompt 使用代码内固定、版本化的模板，只包含论文标题、英文摘要和 `TOPICS.yaml` 中的候选 topic。作者、PDF、正文和用户自定义 instructions 不得进入分类判断。pi agent 仅作为内部自动化执行器，调用方不能注入临时任务说明。
+分类 prompt 使用代码内固定、版本化的模板，只包含论文标题、英文摘要和 `TOPICS.yaml` 中的候选 topic。作者、PDF、正文和用户自定义 instructions 不得进入分类判断。LLM 仅作为内部自动化执行器，调用方不能注入临时任务说明。
 
 agent 必须返回一个 JSON 对象：
 
@@ -97,7 +99,7 @@ agent 必须返回一个 JSON 对象：
 
 `categories` 至少一个且只能来自受控 topic ID；`tags` 可为空，最多 3 个，使用小写短横线格式。无效 JSON、未知分类、超时或服务错误按配置次数重试，最终失败写入错误表。没有评分，因此所有成功抓取且分类成功的论文都进入输出，不做 threshold 过滤。
 
-分类缓存 key 至少包含 arXiv ID、标题/摘要 hash、topic 词表 hash、固定 prompt 版本、agent 包版本、provider 和 model。任一输入变化都必须使旧分类缓存失效。
+分类缓存 key 至少包含 arXiv ID、标题/摘要 hash、topic 词表 hash、固定 prompt 版本、客户端版本、model 和端点。任一输入变化都必须使旧分类缓存失效。
 
 ## 5. 缓存与数据模型
 
@@ -105,7 +107,7 @@ SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，成功的抓取和分�
 
 - `papers`：arXiv ID、版本、标题、作者 JSON、原始 arXiv 分类、英文摘要、发布时间、详情 URL、来源 URL、内容 hash、抓取时间。
 - `fetch_cache`：URL、请求指纹、HTTP 状态、响应体 hash、ETag/Last-Modified、过期时间和错误。
-- `classification_cache`：论文内容 hash、topic/prompt/agent 元信息、category JSON、tag JSON、原始响应、状态和时间。
+- `classification_cache`：论文内容 hash、topic/prompt/client 元信息、category JSON、tag JSON、原始响应、状态和时间。
 - `runs`：run ID、周窗口、配置 hash、开始/结束时间、状态和统计信息。
 - `run_papers`：运行与论文的关联、分类结果、是否输出、排序序号和过滤/错误原因。
 - `crawl_errors` / `agent_errors`：阶段、论文、URL（如有）、错误类型、重试次数和消息。

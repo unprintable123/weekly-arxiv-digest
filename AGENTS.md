@@ -6,7 +6,7 @@
 
 - Runtime: Node.js `>=22.19.0`, ECMAScript modules, pnpm `9.15.0`.
 - Language and build: strict TypeScript, `tsx` for local execution, `tsc` for the build.
-- Runtime libraries: `zod` for validation, `yaml` for configuration, `cheerio` for HTML/Atom parsing, `p-limit` for bounded concurrency, `sql.js` for the SQLite/WASM store, and the local `@earendil-works/pi-*` packages for the agent.
+- Runtime libraries: `zod` for validation, `yaml` for configuration, `cheerio` for HTML/Atom parsing, `p-limit` for bounded concurrency, `sql.js` for the SQLite/WASM store, and the built-in OpenAI-compatible chat completion client (`src/llm.ts`) for the LLM.
 - Test and quality tools: Vitest and ESLint with the `typescript-eslint` recommended rules.
 - Sources: `papers.cool` HTML or the arXiv Export API, selected by `source.provider` in `config.yaml`.
 - Storage: `.cache/weekly-digest.sqlite`; generated Markdown is written to `digests/` by default.
@@ -16,7 +16,7 @@ The pipeline is deliberately layered:
 
 1. `src/config.ts` validates YAML and resolves source category aliases. `src/window.ts` computes explicit or configured ISO-week windows.
 2. `src/crawler.ts` discovers and normalizes papers, handles pagination, versions, retries, rate limits, bounded detail requests, and HTTP response caching. It must never request PDFs.
-3. `src/pi.ts` adapts the local pi TypeScript API and owns fixed-template category/tag JSON validation. Prompts may use only the title, English abstract, and the controlled topic vocabulary.
+3. `src/llm.ts` owns the OpenAI-compatible chat completion client and fixed-template category/tag JSON validation. Prompts may use only the title, English abstract, and the controlled topic vocabulary.
 4. `src/db.ts` persists papers, fetches, classification results, runs, run-paper associations, crawl/agent errors, and run document snapshots.
 5. `src/pipeline.ts` coordinates stages and cache keys, while `src/renderer.ts` renders a `DigestDocument` without doing I/O or calling an agent.
 6. `src/cli.ts` exposes `run`, `preview`, and `cache` commands and keeps stdout machine-readable.
@@ -47,12 +47,12 @@ The assistant must:
 - preserve deterministic ordering, stable hashes, cache invalidation metadata, and run snapshots;
 - record recoverable fetch and classification-agent failures instead of silently producing an empty successful digest;
 - keep secrets in environment variables and out of YAML, source, logs, fixtures, and generated Markdown;
-- add or update focused tests for behavior changes, preferably using the existing fixtures and mocked `fetch`/`PiInvoker` helpers.
+- add or update focused tests for behavior changes, preferably using the existing fixtures and mocked `fetch`/`LlmInvoker` helpers.
 
 The assistant must not:
 
 - download or parse paper PDFs, or include PDF/body text in classification prompts;
-- invoke a global `pi` binary, `npx`, runtime package downloads, or child processes for the agent;
+- invoke a global `pi` binary, `npx`, runtime package downloads, or child processes for the LLM;
 - bypass the configured provider, source categories, fixed topic vocabulary, or output format;
 - weaken TypeScript validation or replace structured parsers with regular expressions for HTML/XML;
 - delete or reset user files, caches, generated digests, or unrelated worktree changes without explicit approval;

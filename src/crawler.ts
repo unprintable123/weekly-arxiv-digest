@@ -47,8 +47,10 @@ export interface CrawlerOptions {
 type FetchOptions = { accept: string };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_RETRIES = 3;
-const DEFAULT_PAGE_SIZE = 100;
+const DEFAULT_PAGE_SIZE = 500;
 const DEFAULT_CONCURRENCY = 4;
+/** Hard cap for the papers.cool `show` parameter; the endpoint has no page parameter. */
+const MAX_LIST_SHOW = 1000;
 
 function trimText(value: string | undefined | null): string {
   return (value ?? '').replace(/\s+/g, ' ').trim();
@@ -278,46 +280,41 @@ export class PapersCoolCrawler implements PaperCrawler {
       to: dateOnly(to),
       force: !!this.opts.force,
     });
-    // papers.cool's category endpoint is a daily page, so a weekly window
-    // requires one request sequence for every day in the half-open interval.
+    // papers.cool's category endpoint is a daily page with `date` and `show`
+    // parameters only — there is no pagination. One request per day returns
+    // the full list for that day, so `show` is raised to cover the whole day.
     for (
       let day = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
       day < to;
       day = new Date(day.getTime() + DAY_MS)
     ) {
-      for (let page = 1; page <= 100; page += 1) {
-        const url = new URL(`${this.opts.baseUrl}/arxiv/${encodeURIComponent(category)}`);
-        url.searchParams.set('date', dateOnly(day));
-        url.searchParams.set('show', String(this.opts.pageSize ?? DEFAULT_PAGE_SIZE));
-        url.searchParams.set('page', String(page));
-        let html: string;
-        try {
-          html = await this.http.text(url.toString(), { accept: 'text/html,application/xhtml+xml' });
-        } catch (error) {
-          errors.push({
-            stage: 'list',
-            category,
-            url: url.toString(),
-            message: errorMessage(error),
-          });
-          break;
-        }
-        const $ = cheerio.load(html);
-        const items = $('div.panel.paper');
-        this.opts.logger?.debug('crawl_list_page', {
-          provider: 'papers.cool',
+      const url = new URL(`${this.opts.baseUrl}/arxiv/${encodeURIComponent(category)}`);
+      url.searchParams.set('date', dateOnly(day));
+      url.searchParams.set('show', String(Math.max(this.opts.pageSize ?? DEFAULT_PAGE_SIZE, MAX_LIST_SHOW)));
+      let html: string;
+      try {
+        html = await this.http.text(url.toString(), { accept: 'text/html,application/xhtml+xml' });
+      } catch (error) {
+        errors.push({
+          stage: 'list',
           category,
-          page,
-          date: dateOnly(day),
-          items: items.length,
+          url: url.toString(),
+          message: errorMessage(error),
         });
-        if (items.length === 0) break;
-        for (const element of items.toArray()) {
-          const paper = this.parseListItem($, element, url.toString());
-          if (!paper || !withinWindow(paper.publishedAt, from, to)) continue;
-          found.set(paper.arxivId, chooseLatest(found.get(paper.arxivId), paper));
-        }
-        if (items.length < (this.opts.pageSize ?? DEFAULT_PAGE_SIZE)) break;
+        continue;
+      }
+      const $ = cheerio.load(html);
+      const items = $('div.panel.paper');
+      this.opts.logger?.debug('crawl_list_page', {
+        provider: 'papers.cool',
+        category,
+        date: dateOnly(day),
+        items: items.length,
+      });
+      for (const element of items.toArray()) {
+        const paper = this.parseListItem($, element, url.toString());
+        if (!paper || !withinWindow(paper.publishedAt, from, to)) continue;
+        found.set(paper.arxivId, chooseLatest(found.get(paper.arxivId), paper));
       }
     }
 
@@ -338,64 +335,49 @@ export class PapersCoolCrawler implements PaperCrawler {
     }
 
     const detailed = new Map<string, Paper>();
+    // List items already carry title, authors, categories, date and abstract,
+    // so no per-paper detail requests are made. The arXiv fallback only runs
+    // for the rare list item that is missing an abstract.
+    const missingAbstract = candidates.filter((paper) => !paper.abstractEn);
+    this.opts.logger?.debug('crawl_list_complete', {
+      provider: 'papers.cool',
+      category,
+      papers: candidates.length,
+      missing_abstract: missingAbstract.length,
+    });
     const limit = pLimit(this.opts.concurrency ?? DEFAULT_CONCURRENCY);
-    const tasks = candidates.map((paper) =>
+    const tasks = missingAbstract.map((paper) =>
       limit(async () => {
-        let merged = paper;
-        const detailUrl = this.detailPageUrl(paper.arxivId, paper.version);
-        this.opts.logger?.debug('crawl_detail_start', {
+        this.opts.logger?.debug('crawl_fallback_start', {
           provider: 'papers.cool',
           category,
           arxiv_id: paper.arxivId,
-          url: detailUrl,
         });
-        try {
-          const html = await this.http.text(detailUrl, { accept: 'text/html,application/xhtml+xml' });
-          merged = mergePaper(paper, this.parseDetail(html, detailUrl));
-          this.opts.logger?.debug('crawl_detail_success', {
-            provider: 'papers.cool',
-            category,
-            arxiv_id: paper.arxivId,
-            has_abstract: !!merged.abstractEn,
-          });
-        } catch (error) {
+        const fallback = await this.fetchArxivFallback(paper, category, errors);
+        this.opts.logger?.debug('crawl_fallback_result', {
+          provider: 'papers.cool',
+          category,
+          arxiv_id: paper.arxivId,
+          found: !!fallback?.abstractEn,
+        });
+        if (!fallback) {
           errors.push({
-            stage: 'detail',
+            stage: 'fallback',
             category,
             arxivId: paper.arxivId,
-            url: detailUrl,
-            message: errorMessage(error),
-          });
-        }
-        if (!merged.abstractEn) {
-          this.opts.logger?.debug('crawl_fallback_start', {
-            provider: 'papers.cool',
-            category,
-            arxiv_id: paper.arxivId,
-          });
-          const fallback = await this.fetchArxivFallback(merged, category, errors);
-          if (fallback) merged = mergePaper(merged, fallback);
-          this.opts.logger?.debug('crawl_fallback_result', {
-            provider: 'papers.cool',
-            category,
-            arxiv_id: paper.arxivId,
-            found: !!fallback?.abstractEn,
-          });
-        }
-        if (!merged.abstractEn) {
-          errors.push({
-            stage: 'detail',
-            category,
-            arxivId: paper.arxivId,
-            url: detailUrl,
-            message: 'missing abstract after detail page and arXiv fallback',
+            url: `${this.opts.baseUrl}/arxiv/${paper.arxivId}`,
+            message: 'missing abstract after list page and arXiv fallback',
           });
           return;
         }
+        const merged = mergePaper(paper, fallback);
         if (withinWindow(merged.publishedAt, from, to)) detailed.set(merged.arxivId, merged);
       }),
     );
     await Promise.all(tasks);
+    for (const paper of candidates) {
+      if (paper.abstractEn) detailed.set(paper.arxivId, paper);
+    }
 
     this.opts.logger?.debug('crawl_category_end', {
       provider: 'papers.cool',
@@ -411,10 +393,6 @@ export class PapersCoolCrawler implements PaperCrawler {
       errors,
       newFetches: this.http.stats.networkFetches > startFetches,
     };
-  }
-
-  private detailPageUrl(id: string, version?: string): string {
-    return `${this.opts.baseUrl}/arxiv/${id}${version ?? ''}`;
   }
 
   private parseListItem($: cheerio.CheerioAPI, element: any, sourceUrl: string): Paper | undefined {
@@ -456,41 +434,6 @@ export class PapersCoolCrawler implements PaperCrawler {
       detailUrl: `https://arxiv.org/abs/${identity.id}${identity.version ?? ''}`,
       sourceUrl,
     });
-  }
-
-  private parseDetail(html: string, sourceUrl: string): Partial<Paper> {
-    const $ = cheerio.load(html);
-    const title = trimText(
-      $('h1.title, a.title-link, meta[name="citation_title"]').first().attr('content') ||
-      $('h1.title, a.title-link').first().text(),
-    );
-    const abstractEn = abstractText(
-      (
-        $('p.summary, blockquote.abstract, div.abstract, meta[name="citation_abstract"]').first().attr('content') ||
-        $('p.summary, blockquote.abstract, div.abstract').first().text()
-      ),
-    );
-    const authors = $('a.author, meta[name="citation_author"]')
-      .map((_, item) => trimText($(item).attr('content') || $(item).text()))
-      .get()
-      .filter(Boolean);
-    const categories = $('p.subjects a, .subjects a, span.subject a, meta[name="citation_category"]')
-      .map((_, item) => trimText($(item).attr('content') || $(item).text()))
-      .get()
-      .filter(Boolean);
-    const published = parseDate(
-      $('span.date-data, time[datetime], meta[name="citation_date"]').first().attr('datetime') ||
-      $('span.date-data, time[datetime], meta[name="citation_date"]').first().attr('content') ||
-      $('span.date-data').first().text(),
-    );
-    return {
-      title: title || undefined,
-      abstractEn: abstractEn || undefined,
-      authors: unique(authors),
-      categories: unique(categories),
-      publishedAt: published?.toISOString(),
-      sourceUrl,
-    };
   }
 
   private async fetchArxivFallback(

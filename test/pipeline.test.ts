@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig, type Config } from '../src/config.js';
+import { Logger } from '../src/log.js';
 import { previewDigest, retryRun, runDigest, type RunResult } from '../src/pipeline.js';
 import { weekWindow } from '../src/window.js';
 import { fixture, repoTopicsPath, routeContains, stubFetch } from './helpers.js';
@@ -19,21 +20,13 @@ source:
 output:
   directory: digests
   filename: weekly-{week}-{category}.md
-pi_agent:
-  provider: test
+llm:
   model: test-model
   timeout_ms: 5000
   max_retries: 0
 `;
 
-/** Detail page for the MoE paper with a newer date so publishedAt ordering is observable. */
-const moeDetail = `<!DOCTYPE html><html><body>
-    <h1 class="title">Mixture of Experts Revisited (Detailed)</h1>
-    <p class="summary">We revisit sparse mixture-of-experts layers and report routing stability improvements for large language models.</p>
-    <span class="date-data">2024-01-03</span>
-    <p class="authors"><a class="author" href="/a/carol">Carol Test</a></p>
-    <p class="subjects"><a href="/cat/cs.LG">cs.LG</a></p>
-  </body></html>`;
+/** List fixture publishes attention 2024-01-01 and MoE 2024-01-02, so publishedAt ordering is observable. */
 
 function makeRoot(): string {
     return mkdtempSync(join(tmpdir(), 'weekly-digest-pipeline-'));
@@ -70,11 +63,8 @@ function setupInvoker(overrides: { attention?: string[]; moe?: string[] } = {}) 
 const window = () => weekWindow('2024-01-01', '2024-01-08');
 
 function stubCrawl(): ReturnType<typeof stubFetch> {
-    return stubFetch([
-        routeContains('/arxiv/cs.LG', fixture('papers-cool-list.html')),
-        routeContains('/arxiv/2401.01234', fixture('papers-cool-detail.html')),
-        { match: (url: string) => url.endsWith('/arxiv/2401.01235'), body: moeDetail },
-    ]);
+    // List items carry all metadata; no per-paper detail requests are made.
+    return stubFetch([routeContains('/arxiv/cs.LG', fixture('papers-cool-list.html'))]);
 }
 
 function fileContents(result: RunResult): string[] {
@@ -108,8 +98,8 @@ describe('runDigest', () => {
             expect(result.files.every((file) => existsSync(file))).toBe(true);
 
             const architecture = contentFor(result, 'llm-architecture');
-            expect(architecture).toContain('## Attention Is All You Need: A Study of Scalable Attention (Detailed)');
-            expect(architecture).toContain('## Mixture of Experts Revisited (Detailed)');
+            expect(architecture).toContain('## Attention Is All You Need: A Study of Scalable Attention');
+            expect(architecture).toContain('## Mixture of Experts Revisited');
             expect(architecture).toContain('- **Category:** 大模型架构');
             expect(architecture).toContain('- **Tag:** `attention`, `linear-attention`');
             expect(architecture).toContain('- **Authors:** Alice Example, Bob Sample');
@@ -120,7 +110,7 @@ describe('runDigest', () => {
 
             const physics = contentFor(result, 'llm-physics');
             expect(physics).toContain('# Weekly arXiv Digest: 2024-W01 — LLM 物理与理论');
-            expect(physics).toContain('## Attention Is All You Need: A Study of Scalable Attention (Detailed)');
+            expect(physics).toContain('## Attention Is All You Need: A Study of Scalable Attention');
             expect(physics).not.toContain('Mixture of Experts');
 
             // Snapshots exist for every category document.
@@ -147,7 +137,7 @@ describe('runDigest', () => {
 
             const result = await runDigest(cfg, window(), { root, invoker });
             expect(result.documents).toHaveLength(1);
-            // MoE was published 2024-01-03, attention 2024-01-02.
+            // MoE was published 2024-01-02, attention 2024-01-01.
             expect(result.documents[0].papers.map((paper) => paper.arxivId)).toEqual([
                 '2401.01235',
                 '2401.01234',
@@ -234,6 +224,39 @@ describe('runDigest', () => {
 
             await expect(runDigest(cfg, window(), { root, invoker })).rejects.toThrow(/Source unavailable/);
             expect(existsSync(join(root, 'digests'))).toBe(false);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('logs classify_start before each LLM call without leaking prompts', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+            let output = '';
+            const logger = new Logger({
+                runId: 'test-run',
+                debug: true,
+                stream: { write: (chunk: string) => { output += chunk; return true; } } as NodeJS.WritableStream,
+            });
+
+            await runDigest(cfg, window(), { root, invoker, logger });
+
+            const events = output.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+            const starts = events.filter((entry) => entry.event === 'classify_start');
+            // One classify_start per agent call, emitted before the call.
+            expect(starts).toHaveLength(invoker.complete.mock.calls.length);
+            expect(starts.length).toBeGreaterThan(0);
+            for (const start of starts) {
+                expect(start.arxiv_id).toBeTruthy();
+                expect(start.attempt).toBe(1);
+                expect(start.model).toBe('test-model');
+            }
+            // Prompts and abstracts never appear in the log.
+            expect(output).not.toContain('Attention Is All You Need');
+            expect(output).not.toContain('Controlled topic catalog');
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

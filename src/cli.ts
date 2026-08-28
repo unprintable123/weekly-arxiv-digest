@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
 import { Store } from './db.js';
 import { Logger } from './log.js';
-import { PiAgentAdapter } from './pi.js';
+import { ChatCompletionClient } from './llm.js';
 import { previewDigest, retryRun, runDigest, type RetryStage } from './pipeline.js';
 import { weekWindow } from './window.js';
 
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
             root,
             force: flag('--force'),
             dryRun: flag('--dry-run'),
-            invoker: new PiAgentAdapter(),
+            invoker: new ChatCompletionClient(),
             logger: makeLogger(),
         });
         const uniquePapers = new Set(
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
         const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
         const result = await retryRun(cfg, runId, stage as RetryStage, {
             root,
-            invoker: new PiAgentAdapter(),
+            invoker: new ChatCompletionClient(),
             logger: makeLogger(),
         });
         console.log(
