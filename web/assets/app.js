@@ -147,7 +147,7 @@ function renderCard(paper) {
     const tldrBlock = tldr
         ? element(
             'div',
-            ['mt-3', 'rounded-lg', 'bg-indigo-50', 'py-2', 'text-sm', 'leading-relaxed', 'text-slate-700', 'dark:bg-indigo-950/40', 'dark:text-slate-200'],
+            ['mt-3', 'rounded-lg', 'py-2', 'text-sm', 'leading-relaxed', 'text-slate-700', 'dark:text-slate-200'],
             [
                 element('span', ['font-semibold', 'text-indigo-700', 'dark:text-indigo-300'], ['TLDR: ']),
                 document.createTextNode(tldr),
