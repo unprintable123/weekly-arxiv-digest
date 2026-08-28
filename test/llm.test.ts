@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     buildClassificationPrompt,
@@ -10,11 +9,10 @@ import {
     normalizeBatchClassification,
     normalizeClassification,
 } from '../src/llm.js';
-import { parseTaxonomy } from '../src/topics.js';
 import type { Paper } from '../src/types.js';
-import { repoTopicsPath } from './helpers.js';
+import { fixtureTaxonomy } from './helpers.js';
 
-const taxonomy = parseTaxonomy(readFileSync(repoTopicsPath, 'utf8'));
+const taxonomy = fixtureTaxonomy();
 
 const paper = (overrides: Partial<Paper> = {}): Paper => ({
     arxivId: '2401.01234',
@@ -37,8 +35,8 @@ describe('buildClassificationPrompt', () => {
         expect(prompt).toContain(papers[0].title);
         expect(prompt).toContain(papers[1].title);
         expect(prompt).toContain(papers[0].abstractEn);
-        expect(prompt).toContain('- llm-architecture: ');
-        expect(prompt).toContain('physics-of-llm');
+        expect(prompt).toContain('- test-architecture: ');
+        expect(prompt).toContain('test-reasoning');
         expect(prompt).toContain('Use "other" only when no other topic fits.');
         expect(prompt).toContain('JSON array');
         expect(prompt).toContain('id: 2401.01234');
@@ -67,34 +65,34 @@ describe('buildClassificationPrompt', () => {
 describe('normalizeClassification', () => {
     it('accepts canonical categories and keeps primary-first order', () => {
         const result = normalizeClassification(taxonomy, {
-            categories: ['llm-architecture', 'physics-of-llm'],
+            categories: ['test-architecture', 'test-reasoning'],
             tags: ['attention'],
         });
-        expect(result.categories).toEqual(['llm-architecture', 'physics-of-llm']);
+        expect(result.categories).toEqual(['test-architecture', 'test-reasoning']);
         expect(result.tags).toEqual(['attention']);
     });
 
     it('resolves aliases and drops unknown categories', () => {
         const result = normalizeClassification(taxonomy, {
-            categories: ['multimodal-gen', 'made-up-topic'],
+            categories: ['arch', 'made-up-topic'],
             tags: [],
         });
-        expect(result.categories).toEqual(['multimodal-generation']);
+        expect(result.categories).toEqual(['test-architecture']);
     });
 
     it('applies precedence before capping at max_categories', () => {
-        // TOPICS.yaml: multimodal-generation > diffusion-lm
+        // fixture: test-architecture > test-training
         const result = normalizeClassification(taxonomy, {
-            categories: ['diffusion-lm', 'multimodal-generation', 'llm-architecture'],
+            categories: ['test-training', 'test-architecture', 'test-reasoning'],
             tags: [],
         });
-        expect(result.categories).toEqual(['multimodal-generation', 'diffusion-lm']);
+        expect(result.categories).toEqual(['test-architecture', 'test-training']);
         expect(result.categories).toHaveLength(taxonomy.rules.maxCategories);
     });
 
     it('normalizes, deduplicates and caps tags, rejecting malformed ones', () => {
         const result = normalizeClassification(taxonomy, {
-            categories: ['llm-architecture'],
+            categories: ['test-architecture'],
             tags: ['Attention', 'attention', 'not a tag!', 'a-b-c-d-e', 'state-space-model'],
         });
         // 'Attention' lowercases into a duplicate; 'not a tag!' is invalid;
@@ -109,18 +107,18 @@ describe('normalizeClassification', () => {
         );
         expect(() => normalizeClassification(taxonomy, { tags: [] })).toThrow();
         expect(() => normalizeClassification(taxonomy, 'not an object')).toThrow();
-        expect(() => normalizeClassification(taxonomy, { categories: ['llm-architecture'], tags: 'x' })).toThrow();
+        expect(() => normalizeClassification(taxonomy, { categories: ['test-architecture'], tags: 'x' })).toThrow();
     });
 
     it('rejects response keys outside the fixed agent contract', () => {
         expect(() =>
             normalizeClassification(taxonomy, {
-                categories: ['llm-architecture'],
+                categories: ['test-architecture'],
             }),
         ).toThrow();
         expect(() =>
             normalizeClassification(taxonomy, {
-                categories: ['llm-architecture'],
+                categories: ['test-architecture'],
                 tags: [],
                 score: 10,
             }),
@@ -144,15 +142,15 @@ describe('ChatCompletionClient', () => {
         process.env.BASE_URL = 'https://llm.example/v1/';
         process.env.API_KEY = 'secret-key';
         const fetchMock = vi.fn(async () =>
-            new Response(JSON.stringify(completion('{"categories": ["rag"]}')), { status: 200 }),
+            new Response(JSON.stringify(completion('{"categories": ["test-retrieval"]}')), { status: 200 }),
         );
         vi.stubGlobal('fetch', fetchMock);
 
         const client = new ChatCompletionClient();
         const raw = await client.complete('the prompt', { model: 'test-model', timeoutMs: 1000 });
-        expect(raw).toBe('{"categories": ["rag"]}');
+        expect(raw).toBe('{"categories": ["test-retrieval"]}');
 
-        const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+        const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
         expect(url).toBe('https://llm.example/v1/chat/completions');
         expect(init.method).toBe('POST');
         expect((init.headers as Record<string, string>).authorization).toBe('Bearer secret-key');
@@ -180,7 +178,7 @@ describe('ChatCompletionClient', () => {
             model: 'm',
             timeoutMs: 1000,
         });
-        expect(fetchMock.mock.calls[0][0]).toBe('https://config.example/v1/chat/completions');
+        expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe('https://config.example/v1/chat/completions');
     });
 
     it('fails fast when the endpoint or key is missing', async () => {
@@ -227,10 +225,10 @@ describe('normalizeBatchClassification', () => {
 
     it('maps one response object per paper, keyed by arxiv id', () => {
         const results = normalizeBatchClassification(taxonomy, batch, [
-            { id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] },
+            { id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] },
             { id: '2401.01235', categories: ['other'], tags: [] },
         ]);
-        expect(results.get('2401.01234')?.categories).toEqual(['llm-architecture']);
+        expect(results.get('2401.01234')?.categories).toEqual(['test-architecture']);
         expect(results.get('2401.01235')?.categories).toEqual(['other']);
         expect(results.size).toBe(2);
     });
@@ -238,12 +236,12 @@ describe('normalizeBatchClassification', () => {
     it('rejects missing, duplicate, or unknown paper ids', () => {
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: '2401.01234', categories: ['llm-architecture'], tags: [] },
+                { id: '2401.01234', categories: ['test-architecture'], tags: [] },
             ]),
         ).toThrow(/missing papers/);
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: '2401.01234', categories: ['llm-architecture'], tags: [] },
+                { id: '2401.01234', categories: ['test-architecture'], tags: [] },
                 { id: '2401.01234', categories: ['other'], tags: [] },
                 { id: '2401.01235', categories: ['other'], tags: [] },
             ]),
@@ -268,7 +266,7 @@ describe('normalizeBatchClassification', () => {
         ).toThrow(/no valid topic id/);
         expect(() =>
             normalizeBatchClassification(taxonomy, batch, [
-                { id: '2401.01234', categories: ['llm-architecture'], tags: [], score: 5 },
+                { id: '2401.01234', categories: ['test-architecture'], tags: [], score: 5 },
                 { id: '2401.01235', categories: ['other'], tags: [] },
             ]),
         ).toThrow(/unrecognized key/i);
@@ -282,17 +280,17 @@ describe('classifyPapers', () => {
         const invoker = {
             complete: vi.fn(async () =>
                 JSON.stringify([
-                    { id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] },
-                    { id: '2401.01235', categories: ['physics-of-llm'], tags: [] },
+                    { id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] },
+                    { id: '2401.01235', categories: ['test-reasoning'], tags: [] },
                 ]),
             ),
         };
         const results = await classifyPapers(batch, taxonomy, agent, invoker);
-        expect(results.get('2401.01234')?.categories).toEqual(['llm-architecture']);
-        expect(results.get('2401.01235')?.categories).toEqual(['physics-of-llm']);
+        expect(results.get('2401.01234')?.categories).toEqual(['test-architecture']);
+        expect(results.get('2401.01235')?.categories).toEqual(['test-reasoning']);
         expect(results.get('2401.01234')).not.toHaveProperty('raw');
         expect(invoker.complete).toHaveBeenCalledTimes(1);
-        const [prompt, options] = invoker.complete.mock.calls[0];
+        const [prompt, options] = invoker.complete.mock.calls[0] as unknown as [string, { model: string; timeoutMs: number }];
         expect(prompt).toContain(batch[0].title);
         expect(prompt).toContain(batch[1].title);
         expect(options).toEqual({ model: 'test-model', timeoutMs: 1000 });
@@ -326,11 +324,11 @@ describe('classifyPapers', () => {
             complete: vi.fn(async () => {
                 calls += 1;
                 if (calls === 1) return '[{"id": "2401.01234", "categories": ["ghost"], "tags": []}]';
-                return '[{"id": "2401.01234", "categories": ["rag"], "tags": []}]';
+                return '[{"id": "2401.01234", "categories": ["test-retrieval"], "tags": []}]';
             }),
         };
         const results = await classifyPapers([paper()], taxonomy, agent, invoker);
-        expect(results.get('2401.01234')?.categories).toEqual(['rag']);
+        expect(results.get('2401.01234')?.categories).toEqual(['test-retrieval']);
         expect(invoker.complete).toHaveBeenCalledTimes(2);
     });
 

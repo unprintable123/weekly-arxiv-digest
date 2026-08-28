@@ -30,6 +30,9 @@ export type DigestDocument = {
   to: string;
   categoryId: string;
   categoryName: string;
+  /** Optional taxonomy group id (absent when the taxonomy has no groups). */
+  groupId?: string;
+  groupName?: string;
   generatedAt: string;
   configHash: string;
   /** Unique papers crawled for the run (shared across all category documents). */

@@ -20,7 +20,7 @@ const sampleDocument = (overrides: Record<string, unknown> = {}) => ({
     from: '2024-01-01',
     to: '2024-01-08',
     categoryId: 'llm-architecture',
-    categoryName: '大模型架构',
+    categoryName: 'Architecture',
     generatedAt: '2024-01-08T00:00:00.000Z',
     configHash: 'abc123',
     candidateCount: 5,
@@ -196,6 +196,6 @@ function makeWeekDirIn(digestsDir: string, week: string): void {
         week,
         from: '2024-01-01',
         to: '2024-01-08',
-        categories: [{ id: 'llm-architecture', name: '大模型架构', count: 1 }],
+        categories: [{ id: 'llm-architecture', name: 'Architecture', count: 1 }],
     });
 }

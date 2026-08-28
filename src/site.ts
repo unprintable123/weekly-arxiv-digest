@@ -31,20 +31,30 @@ export type WebDigestDocument = {
     to: string;
     categoryId: string;
     categoryName: string;
+    /** Optional taxonomy group metadata (absent in legacy documents). */
+    groupId?: string;
+    groupName?: string;
     generatedAt: string;
     configHash: string;
     candidateCount: number;
     papers: WebPaper[];
 };
 
-/** `digests/<week>/index.json` — drives the category picker and count badges. */
+/** `digests-json/<week>/index.json` — drives the group/category picker. */
 export type WeekIndex = {
     version: 1;
     week: string;
     from: string;
     to: string;
     /** Category entries sorted by id. */
-    categories: Array<{ id: string; name: string; count: number }>;
+    categories: Array<{
+        id: string;
+        name: string;
+        count: number;
+        /** Optional taxonomy group; omitted for legacy data without groups. */
+        groupId?: string;
+        groupName?: string;
+    }>;
 };
 
 /** `digests/index.json` — drives the week picker, newest first. */
@@ -78,6 +88,8 @@ const webDocumentSchema = z
         to: z.string().min(1),
         categoryId: z.string().min(1),
         categoryName: z.string().min(1),
+        groupId: z.string().min(1).optional(),
+        groupName: z.string().min(1).optional(),
         generatedAt: z.string(),
         configHash: z.string(),
         candidateCount: z.number().int().nonnegative(),
@@ -91,7 +103,13 @@ const weekIndexSchema = z
         from: z.string().min(1),
         to: z.string().min(1),
         categories: z.array(
-            z.object({ id: z.string().min(1), name: z.string(), count: z.number().int() }),
+            z.object({
+                id: z.string().min(1),
+                name: z.string(),
+                count: z.number().int(),
+                groupId: z.string().min(1).optional(),
+                groupName: z.string().min(1).optional(),
+            }),
         ),
     });
 
@@ -123,6 +141,8 @@ export function toWebDocument(document: {
     to: string;
     categoryId: string;
     categoryName: string;
+    groupId?: string;
+    groupName?: string;
     generatedAt: string;
     configHash: string;
     candidateCount: number;
@@ -143,6 +163,8 @@ export function toWebDocument(document: {
         to: document.to,
         categoryId: document.categoryId,
         categoryName: document.categoryName,
+        ...(document.groupId ? { groupId: document.groupId } : {}),
+        ...(document.groupName ? { groupName: document.groupName } : {}),
         generatedAt: document.generatedAt,
         configHash: document.configHash,
         candidateCount: document.candidateCount,
@@ -219,6 +241,8 @@ export function rebuildWeekIndex(weekDir: string, week: string): WeekIndex {
         id: document.categoryId,
         name: document.categoryName,
         count: document.papers.length,
+        ...(document.groupId ? { groupId: document.groupId } : {}),
+        ...(document.groupName ? { groupName: document.groupName } : {}),
     }));
     categories.sort((a, b) => a.id.localeCompare(b.id));
     return {

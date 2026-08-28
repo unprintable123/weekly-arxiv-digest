@@ -101,7 +101,7 @@ agent 必须返回一个 JSON 对象：
 
 `categories` 至少一个且只能来自受控 topic ID；`tags` 可为空，最多 3 个，使用小写短横线格式。无效 JSON、未知分类、超时或服务错误按配置次数重试，最终失败写入错误表。没有评分，因此所有成功抓取且分类成功的论文都进入输出，不做 threshold 过滤。
 
-分类缓存 key 至少包含 arXiv ID、标题/摘要 hash、topic 词表 hash、固定 prompt 版本、客户端版本、model 和端点。任一输入变化都必须使旧分类缓存失效。
+分类缓存 key 至少包含 arXiv ID、标题/摘要 hash、固定 prompt 版本、客户端版本、model 和端点。topic 词表 hash 有意不参与 key：编辑 TOPICS.yaml 不会使旧分类缓存失效，重分类只能通过 `digest cache clear-classifications` 显式触发。论文内容（标题/摘要）变化仍会使对应条目失效；精确 key 未命中时按 arXiv ID + 内容 hash 回退复用最新条目，兼容 key 格式变更前的旧缓存。
 
 ## 5. 缓存与数据模型
 
@@ -109,16 +109,16 @@ SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，它只是一个可复�
 
 - `papers`：arXiv ID（主键）、版本、标题、作者 JSON、原始 arXiv 分类、英文摘要、发布时间、更新时间、详情 URL、内容 hash、抓取时间。不再保存 `source_url`；papers.cool 链接由 arXiv ID 按固定模板构造。
 - `fetch_cache`：URL（主键）、解析后的论文列表 JSON、ETag/Last-Modified、过期时间和抓取时间。不存原始响应体：HTTP 层在拿到响应后立即用 DOM/XML 解析器提取条目，只落盘提取结果，因此命中缓存同时跳过网络请求和解析开销，数据库体积也大幅缩小。失败请求从不落盘，下次运行自然重试。
-- `classification_cache`：缓存 key（主键）、arXiv ID、内容 hash、model、category JSON、tag JSON、状态和时间。prompt 版本、client 版本、endpoint 和原始响应不落库：前三者只参与缓存 key 的计算（taxonomy/prompt/client/model/endpoint 任一变化产生新 key，旧条目自动失效），原始 LLM 响应不保存，只保留归一化后的 category/tag。
+- `classification_cache`：缓存 key（主键）、arXiv ID、内容 hash、model、category JSON、tag JSON、状态和时间。prompt 版本、client 版本、endpoint 和原始响应不落库：前三者参与缓存 key 的计算（prompt/client/model/endpoint 任一变化产生新 key；taxonomy 不参与 key，编辑 TOPICS.yaml 不失效缓存），原始 LLM 响应不保存，只保留归一化后的 category/tag。精确 key 未命中时按 arXiv ID + 内容 hash 回退复用最新条目。
 - `meta`：极小的 key/value 表，目前仅保存 `(week, config hash) -> generated_at`，用于让全缓存重复运行的输出字节一致。
 
 写入 IO：sql.js 数据库完全驻留内存，写语句不触发磁盘 IO。刷盘（导出内存快照到临时文件再原子 rename）按以下节奏执行：抓取阶段结束一次；分类阶段每积累 100 条新增分类结果一次，阶段结束时再补齐不足 100 条的尾部；meta 更新后；`close()`。纯缓存命中的读取路径不产生任何写入和刷盘。进程崩溃最多丢失最近未刷盘的新增缓存，且由于快照是原子替换，磁盘上的旧库文件永远不会损坏。不做旧版本数据库自动迁移：库文件结构仅由当前代码的 SCHEMA 决定，删除旧库文件即重新开始缓存。`cache prune` 在一个事务中完成删除。默认不自动清理缓存。
 
-分类缓存可通过 `digest cache clear-classifications [--older-than DAYS]` 显式清除：不带参数删除全部分类缓存，带参数只删除早于 N 天的条目，返回删除行数。
+分类缓存可通过 `digest cache clear-classifications [--older-than DAYS]` 显式清除：不带参数删除全部分类缓存，带参数只删除早于 N 天的条目，返回删除行数。这是 taxonomy 或提示词变更后触发重分类的唯一途径。
 
 ## 6. Markdown 输出
 
-每周每个 category 生成 `weekly-{week}-{category}.md`，存放在 `output.directory` 下以 `{week}`（如 `2026-W34`）命名的子目录中（`output.subdirectory` 控制，默认 `{week}`，置空则单层存放）。文件头包含周窗口、生成时间、配置 hash、候选数量和该分类数量；每篇论文包含：
+每周每个 category 生成 `weekly-{week}-{category}.md`，写入 `output.directory` 下以 `{week}`（如 `2026-W34`）命名的子目录（`output.subdirectory` 控制，默认 `{week}`，置空则单层存放）。同名 `.json` 副本**不与 Markdown 同目录**：它们写入独立的 JSON feed 目录 `output.json_directory`（默认 `digests-json`），保持相同的相对布局与文件名，使 Markdown 输出与站点 feed 彻底分离（仓库可只发布 JSON）。文件头包含周窗口、生成时间、配置 hash、候选数量和该分类数量；每篇论文包含：
 
 ```markdown
 ## Paper title
@@ -153,7 +153,7 @@ pnpm digest cache prune [--older-than DAYS]
 pnpm digest cache clear-classifications [--older-than DAYS]
 pnpm digest web build --week YYYY-Www [--config config.yaml]
 pnpm site:css      # 生成 web/assets/app.css（提交进仓库）
-pnpm site:build    # web/ + digests/ -> dist/site
+pnpm site:build    # web/ + digests-json/ -> dist/site
 pnpm site:deploy   # site:build 后把 dist/site 发布到 gh-pages 分支
 ```
 
@@ -172,12 +172,10 @@ pnpm site:deploy   # site:build 后把 dist/site 发布到 gh-pages 分支
 
 ## 9. 静态站点输出（gh-pages）
 
-Markdown 之外，每次 `run` 为每个 category document 额外写一个同名 `.json` 副本（`weekly-{week}-{category}.json`），内容由 `JsonRenderer` 用稳定键序 JSON 序列化（`stableJson`，键排序 + 尾部换行），因此与 Markdown 一样满足"重复运行字节一致"。JSON 保留文档头字段（week/from/to/generatedAt/configHash/candidateCount）与每篇论文的展示字段（arxivId/title/authors/abstractEn/publishedAt/categories/classification），不输出 `contentHash`、`detailUrl` 等内部字段；papers.cool 链接不落盘，由前端按 arXiv ID 以固定模板构造。
+Markdown 之外，每次 `run` 为每个 category document 在 **独立的 JSON feed 目录**（`output.json_directory`，默认 `digests-json`）下写一个同名 `.json` 文档（`weekly-{week}-{category}.json`），内容由 `JsonRenderer` 用稳定键序 JSON 序列化（`stableJson`，键排序 + 尾部换行），因此与 Markdown 一样满足"重复运行字节一致"。JSON 保留文档头字段（week/from/to/categoryId/categoryName/generatedAt/configHash/candidateCount，及可选 groupId/groupName taxonomy 分组信息）与每篇论文的展示字段（arxivId/title/authors/abstractEn/publishedAt/categories/classification），不输出 `contentHash`、`detailUrl` 等内部字段；papers.cool 链接不落盘，由前端按 arXiv ID 以固定模板构造。两级 manifest 也写入 `output.json_directory`：
 
-两级 manifest 由文件系统扫描派生（`src/site.ts`），任何写入路径（run、`web build` 回填）之后都全量重建，不存在增量合并：
-
-- `digests/<week>/index.json`：该周 categories（id/name/count，按 id 排序），驱动类别选择器与数量徽章；
-- `digests/index.json`：所有含有效周 index 的周（week/from/to，按周倒序），驱动周选择器。
+- `digests-json/<week>/index.json`：该周 categories（id/name/count，按 id 排序；含可选 groupId/groupName），驱动 group/category 两级选择器与数量徽章；
+- `digests-json/index.json`：所有含有效周 index 的周（week/from/to，按周倒序），驱动周选择器。
 
 损坏或缺失的 JSON 文件在扫描时被跳过（解析失败视为不存在），一个坏文件不会破坏站点。JSON 写入与 Markdown 相同：临时文件 + 原子 rename。
 
@@ -185,11 +183,12 @@ Markdown 之外，每次 `run` 为每个 category document 额外写一个同名
 
 ### 9.1 站点前端（web/ → dist/site）
 
-`web/` 是无框架静态源码：`index.html` + `assets/app.js`（原生 ES module）+ `app.css`（Tailwind v4 入口）。`pnpm site:css` 用 tailwindcss CLI 产出压缩后的 `assets/app.css`；`pnpm site:build` 把 `web/` 与 `digests/` 数据树拷贝为发布产物 `dist/site`（含 `.nojekyll`）。前端行为契约：
+`web/` 是无框架静态源码：`index.html` + `assets/app.js`（原生 ES module）+ `app.css`（Tailwind v4 入口）。`pnpm site:css` 用 tailwindcss CLI 产出压缩后的 `assets/app.css`；`pnpm site:build` 把 `web/` 与 `digests-json/` 数据树拷贝为发布产物 `dist/site`（拷贝为站点内 `digests/` 路径，含 `.nojekyll`；发布产物只含 JSON feed，不含 Markdown）。前端行为契约：
 
 - 页面只消费 JSON 文件；全部动态文本经 `textContent`/`createElement` 插入，不使用 `innerHTML`；
+- 选择器为 Week + Group + Category 三级：先选 group 再选 category；下拉 option 显示英文 topic id，中文名称放在 option `title`（hover 提示）和选中项旁的小字提示中；旧数据（无 groupId）全部归入 `ungrouped` 兜底组；
 - 链接白名单与 Markdown 渲染器一致：仅 `https://arxiv.org/`（含 export 镜像归一化）与 `https://papers.cool/`，其余一律降级为纯文本；papers.cool 链接由 arXiv ID 前端构造；
-- URL 状态用 query 参数（`?week=YYYY-Www&category=<id>`）：选择变化 `pushState`，前进/后退由 `popstate` 恢复；首次加载无参数时取最新周与首个类别并 `replaceState` 规范化；不使用 path 路由（Pages 静态托管无 rewrite）；
+- URL 状态用 query 参数（`?week=YYYY-Www&category=<id>`）：选择变化 `pushState`，前进/后退由 `popstate` 恢复；首次加载无参数时取最新周与首个类别并 `replaceState` 规范化；group 由 category 通过周 index 反推，不占 URL 参数；不使用 path 路由（Pages 静态托管无 rewrite）；
 - 卡片字段与 Markdown 一致：标题、tag chips、Category/Authors/arXiv/papers.cool/Published、摘要（默认 4 行截断，可展开）；附客户端过滤框（标题/作者/摘要 substring，不参与 URL）与暗色模式（localStorage + `prefers-color-scheme`）。
 
 ### 9.2 GitHub Pages 部署（gh-pages 分支）

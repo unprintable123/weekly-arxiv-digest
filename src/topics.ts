@@ -74,7 +74,11 @@ export type TopicTaxonomy = {
     aliases: Record<string, string>;
     /** ordered [higher, lower] precedence constraints between topic ids */
     precedence: Array<[string, string]>;
-    /** stable hash of the parsed taxonomy content; part of the classification cache key */
+    /**
+     * stable hash of the parsed taxonomy content. Used for diagnostics and
+     * logging only; deliberately excluded from the classification cache key so
+     * editing TOPICS.yaml never invalidates cached classifications.
+     */
     hash: string;
 };
 

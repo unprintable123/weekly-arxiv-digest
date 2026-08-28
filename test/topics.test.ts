@@ -6,7 +6,7 @@ import {
     resolveCategoryId,
     topicCatalog,
 } from '../src/topics.js';
-import { repoTopicsPath } from './helpers.js';
+import { fixtureTopicsPath } from './helpers.js';
 
 const head = `
 version: 1
@@ -27,18 +27,18 @@ rules:
 const validYaml = `
 ${head}
 precedence:
-  - llm-architecture > agent-design
+  - test-architecture > test-reasoning
 groups:
   - id: core
     name: Core
     topics:
-      - id: llm-architecture
+      - id: test-architecture
         name: Architecture
         description: Transformer structures.
         tags: [transformer, attention]
-      - id: agent-design
-        name: Agents
-        description: Agent planning.
+      - id: test-reasoning
+        name: Reasoning
+        description: Inference-time reasoning.
         tags: [planning]
       - id: other
         name: Other
@@ -46,18 +46,17 @@ groups:
         tags: []
 aliases:
   - from: arch
-    to: llm-architecture
+    to: test-architecture
 `;
 
 describe('parseTaxonomy', () => {
-    it('parses the repository TOPICS.yaml with stable, edit-sensitive hashes', () => {
-        const text = readFileSync(repoTopicsPath, 'utf8');
+    it('parses the fixture taxonomy with stable, edit-sensitive hashes', () => {
+        const text = readFileSync(fixtureTopicsPath, 'utf8');
         const taxonomy = parseTaxonomy(text);
         expect(taxonomy.version).toBe(1);
-        expect(Object.keys(taxonomy.topics).length).toBeGreaterThanOrEqual(40);
+        expect(Object.keys(taxonomy.topics).length).toBeGreaterThanOrEqual(5);
         expect(taxonomy.topics.other).toBeDefined();
-        expect(taxonomy.aliases['multimodal-gen']).toBe('multimodal-generation');
-        expect(taxonomy.aliases['rl-reasoning']).toBe('reasoning-rl');
+        expect(taxonomy.aliases['arch']).toBe('test-architecture');
         expect(taxonomy.rules.maxCategories).toBe(2);
         expect(taxonomy.rules.maxTags).toBe(3);
         expect(taxonomy.rules.unknownTopic).toBe('other');
@@ -71,7 +70,7 @@ describe('parseTaxonomy', () => {
         const taxonomy = parseTaxonomy(validYaml);
         const catalog = topicCatalog(taxonomy);
         expect(catalog).toContain(
-            '- llm-architecture: Architecture — Transformer structures. Common tags: transformer, attention.',
+            '- test-architecture: Architecture — Transformer structures. Common tags: transformer, attention.',
         );
         expect(catalog.split('\n')).toHaveLength(taxonomy.topicList.length);
     });
@@ -103,7 +102,7 @@ groups:
     });
 
     it('rejects ids or tags violating the declared patterns', () => {
-        expect(() => parseTaxonomy(validYaml.replace('id: llm-architecture', 'id: Bad_Id')))
+        expect(() => parseTaxonomy(validYaml.replace('id: test-architecture', 'id: Bad_Id')))
             .toThrow(/id_pattern/);
         expect(() => parseTaxonomy(validYaml.replace('tags: [transformer, attention]', 'tags: [Bad Tag]')))
             .toThrow(/tag_pattern/);
@@ -111,7 +110,7 @@ groups:
 
     it('rejects alias targets that do not exist and alias cycles', () => {
         expect(() =>
-            parseTaxonomy(validYaml.replace('to: llm-architecture', 'to: missing-topic')),
+            parseTaxonomy(validYaml.replace('to: test-architecture', 'to: missing-topic')),
         ).toThrow(/Alias target/);
         const cycle = `${head}
 groups:
@@ -138,8 +137,8 @@ aliases:
         expect(() =>
             parseTaxonomy(
                 validYaml.replace(
-                    '- llm-architecture > agent-design',
-                    '- llm-architecture > ghost',
+                    '- test-architecture > test-reasoning',
+                    '- test-architecture > ghost',
                 ),
             ),
         ).toThrow(/Precedence/);
@@ -155,11 +154,11 @@ describe('resolveCategoryId', () => {
     const taxonomy = parseTaxonomy(validYaml);
 
     it('passes canonical ids through', () => {
-        expect(resolveCategoryId(taxonomy, 'llm-architecture')).toBe('llm-architecture');
+        expect(resolveCategoryId(taxonomy, 'test-architecture')).toBe('test-architecture');
     });
 
     it('resolves aliases to canonical ids', () => {
-        expect(resolveCategoryId(taxonomy, 'arch')).toBe('llm-architecture');
+        expect(resolveCategoryId(taxonomy, 'arch')).toBe('test-architecture');
     });
 
     it('returns undefined for unknown or blank ids', () => {
@@ -172,12 +171,12 @@ describe('orderCategoriesByPrecedence', () => {
     const taxonomy = parseTaxonomy(validYaml);
 
     it('moves the higher-precedence topic in front of the lower one', () => {
-        expect(orderCategoriesByPrecedence(taxonomy, ['agent-design', 'llm-architecture']))
-            .toEqual(['llm-architecture', 'agent-design']);
+        expect(orderCategoriesByPrecedence(taxonomy, ['test-reasoning', 'test-architecture']))
+            .toEqual(['test-architecture', 'test-reasoning']);
     });
 
     it('keeps already-correct or unrelated orders stable', () => {
-        expect(orderCategoriesByPrecedence(taxonomy, ['llm-architecture'])).toEqual(['llm-architecture']);
-        expect(orderCategoriesByPrecedence(taxonomy, ['other', 'agent-design'])).toEqual(['other', 'agent-design']);
+        expect(orderCategoriesByPrecedence(taxonomy, ['test-architecture'])).toEqual(['test-architecture']);
+        expect(orderCategoriesByPrecedence(taxonomy, ['other', 'test-reasoning'])).toEqual(['other', 'test-reasoning']);
     });
 });

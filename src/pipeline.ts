@@ -53,18 +53,15 @@ export function configHash(cfg: Config): string {
 }
 
 /**
- * Classification cache key: any change to paper content, taxonomy, prompt
- * version, LLM client, model, or endpoint invalidates the old entries.
+ * Classification cache key: paper content, prompt version, LLM client, model,
+ * and endpoint changes invalidate the old entries. The taxonomy hash is
+ * deliberately NOT part of the key, so editing TOPICS.yaml never re-classifies
+ * cached papers; stale rows are only removed by an explicit cache clear.
  */
-export function classificationCacheKey(
-    paper: Paper,
-    cfg: Config,
-    taxonomyHash: string,
-): string {
+export function classificationCacheKey(paper: Paper, cfg: Config): string {
     return hash({
         id: paper.arxivId,
         content: paper.contentHash,
-        taxonomy: taxonomyHash,
         promptVersion: CLASSIFICATION_PROMPT_VERSION,
         clientVersion: LLM_CLIENT_VERSION,
         model: cfg.llm.model,
@@ -106,17 +103,22 @@ function buildDocuments(
             byCategory.set(categoryId, list);
         }
     }
-    return [...byCategory.keys()].sort().map((categoryId) => ({
-        week: window.week,
-        from: window.from.toISOString().slice(0, 10),
-        to: window.to.toISOString().slice(0, 10),
-        categoryId,
-        categoryName: taxonomy.topics[categoryId]?.name ?? categoryId,
-        generatedAt,
-        configHash: configHashValue,
-        candidateCount,
-        papers: byCategory.get(categoryId)!,
-    }));
+    return [...byCategory.keys()].sort().map((categoryId) => {
+        const topic = taxonomy.topics[categoryId];
+        return {
+            week: window.week,
+            from: window.from.toISOString().slice(0, 10),
+            to: window.to.toISOString().slice(0, 10),
+            categoryId,
+            categoryName: topic?.name ?? categoryId,
+            groupId: topic?.groupId,
+            groupName: topic?.groupName,
+            generatedAt,
+            configHash: configHashValue,
+            candidateCount,
+            papers: byCategory.get(categoryId)!,
+        };
+    });
 }
 
 export async function runDigest(
@@ -199,12 +201,20 @@ export async function runDigest(
         // bad response does not lose the whole batch.
         const classificationKeys = new Map<string, string>();
         for (const paper of papers.values()) {
-            classificationKeys.set(paper.arxivId, classificationCacheKey(paper, cfg, taxonomy.hash));
+            classificationKeys.set(paper.arxivId, classificationCacheKey(paper, cfg));
         }
         const pending: Paper[] = [];
         const results = new Map<string, ClassificationResult>();
         for (const paper of papers.values()) {
-            const cached = opts.force ? undefined : store.getClassification(classificationKeys.get(paper.arxivId)!);
+            const key = classificationKeys.get(paper.arxivId)!;
+            let cached = opts.force ? undefined : store.getClassification(key);
+            // Fallback reuse: a row written under an older key (e.g. before a
+            // taxonomy edit or a key-format change) is still valid for this
+            // paper+content. Taxonomy changes therefore never force a
+            // re-classification; only `digest cache clear-classifications` does.
+            if (!cached && !opts.force) {
+                cached = store.latestClassification(paper.arxivId, paper.contentHash);
+            }
             if (cached) {
                 results.set(paper.arxivId, cached);
                 logger.debug('classify', {
@@ -365,12 +375,20 @@ export async function runDigest(
 
         if (!opts.dryRun) {
             const outDir = join(opts.root, cfg.output.directory);
+            const jsonDir = join(opts.root, cfg.output.json_directory);
             // Two-level layout: one `{week}` subfolder (e.g. "2026-W34") per week.
             const weekDir = join(
                 outDir,
                 cfg.output.subdirectory.replace('{week}', window.week),
             );
+            // JSON twins live in their own tree (same relative layout) so a
+            // repository can publish the JSON feed without the Markdown files.
+            const jsonWeekDir = join(
+                jsonDir,
+                cfg.output.subdirectory.replace('{week}', window.week),
+            );
             await mkdir(weekDir, { recursive: true });
+            await mkdir(jsonWeekDir, { recursive: true });
             const renderer = new MarkdownRenderer();
             const jsonRenderer = new JsonRenderer();
             const files: string[] = [];
@@ -386,17 +404,16 @@ export async function runDigest(
                 await writeFile(temporary, markdown, 'utf8');
                 await rename(temporary, file);
                 files.push(file);
-                // Web twin: same basename with a .json extension, so Markdown
-                // and the static site always expose identical content.
-                const jsonFile = join(weekDir, `${base.slice(0, -(renderer.extension.length + 1))}.json`);
+                // Web twin: same basename, in the separate json_directory tree.
+                const jsonFile = join(jsonWeekDir, `${base.slice(0, -(renderer.extension.length + 1))}.json`);
                 const jsonTemporary = `${jsonFile}.tmp`;
                 await writeFile(jsonTemporary, webJson, 'utf8');
                 await rename(jsonTemporary, jsonFile);
                 files.push(jsonFile);
             }
-            // Manifests are derived by scanning the written documents, so they
-            // stay correct no matter which subset of weeks/categories exists.
-            refreshManifests(outDir, window.week, generatedAt);
+            // Manifests are derived by scanning the written JSON documents, so
+            // they stay correct no matter which subset of weeks/categories exists.
+            refreshManifests(jsonDir, window.week, generatedAt);
             logger.info('run_end', {
                 status,
                 candidates: papers.size,
@@ -456,8 +473,8 @@ export async function buildWebDigests(
     week: string,
 ): Promise<WebBuildResult> {
     const preview = previewDigest(root, cfg, week);
-    const outDir = join(root, cfg.output.directory);
-    const weekDir = join(outDir, cfg.output.subdirectory.replace('{week}', week));
+    const jsonDir = join(root, cfg.output.json_directory);
+    const weekDir = join(jsonDir, cfg.output.subdirectory.replace('{week}', week));
     await mkdir(weekDir, { recursive: true });
     const jsonRenderer = new JsonRenderer();
     const files: string[] = [];
@@ -472,8 +489,8 @@ export async function buildWebDigests(
         await rename(temporary, file);
         files.push(file);
     }
-    refreshManifests(outDir, week, new Date().toISOString());
-    files.push(join(weekDir, 'index.json'), join(outDir, 'index.json'));
+    refreshManifests(jsonDir, week, new Date().toISOString());
+    files.push(join(weekDir, 'index.json'), join(jsonDir, 'index.json'));
     return {
         week,
         files,
@@ -506,9 +523,9 @@ export function previewDigest(
         }
         const results = new Map<string, ClassificationResult>();
         for (const paper of papers) {
-            const cached = store.getClassification(
-                classificationCacheKey(paper, cfg, cfg.topics.hash),
-            );
+            const cached =
+                store.getClassification(classificationCacheKey(paper, cfg)) ??
+                store.latestClassification(paper.arxivId, paper.contentHash);
             if (cached) results.set(paper.arxivId, cached);
         }
         const classified = sortPapers(

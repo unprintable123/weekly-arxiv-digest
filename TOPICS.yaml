@@ -26,6 +26,9 @@ precedence:
   - multimodal-generation > diffusion-lm
   # physics-of-llm wins over llm-training for scaling and training-dynamics theory
   - physics-of-llm > llm-training
+  # text-generation is the generic generation topic; diffusion-lm only for
+  # discrete-diffusion sequence models
+  - multimodal-generation > natural-language-generation
 
 groups:
   - id: llm-core
@@ -112,15 +115,15 @@ groups:
   - id: nlp
     name: NLP 基础任务
     topics:
-      - id: nlg
+      - id: natural-language-generation
         name: 文本生成
         description: 非对话的文本生成、可控生成、风格迁移和开放式生成。
         tags: [text-generation, controlled-generation, style-transfer, open-ended-generation, constrained-decoding, decoding]
-      - id: nlu
+      - id: natural-language-understanding
         name: 自然语言理解
         description: 语义表示、分类、推断、意图识别和语言理解分析。
         tags: [text-classification, semantic-parsing, natural-language-inference, intent-detection, sentence-embedding, semantic-understanding]
-      - id: ner-re
+      - id: information-extraction
         name: 信息抽取
         description: 命名实体识别、关系/事件抽取、槽位填充和结构化信息抽取。
         tags: [named-entity-recognition, relation-extraction, event-extraction, slot-filling, information-extraction, structured-prediction]
@@ -128,7 +131,7 @@ groups:
         name: 对话系统
         description: 任务型/开放域对话、对话状态跟踪、对话管理和响应生成。
         tags: [task-oriented-dialogue, open-domain-dialogue, dialogue-state-tracking, dialogue-management, response-generation, conversation]
-      - id: mt
+      - id: machine-translation
         name: 机器翻译
         description: 翻译模型、低资源/多语言翻译、质量估计和翻译解码。
         tags: [machine-translation, neural-machine-translation, low-resource-translation, multilingual-translation, translation-quality, document-translation]
@@ -218,3 +221,12 @@ aliases:
     to: multimodal-generation
   - from: rl-reasoning
     to: reasoning-rl
+  # legacy compact ids kept resolvable after the full-name rename
+  - from: nlg
+    to: natural-language-generation
+  - from: nlu
+    to: natural-language-understanding
+  - from: ner-re
+    to: information-extraction
+  - from: mt
+    to: machine-translation

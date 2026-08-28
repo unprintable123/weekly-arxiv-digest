@@ -20,7 +20,7 @@ const document = (papers: ClassifiedPaper[], overrides: Partial<DigestDocument> 
     from: '2024-01-01',
     to: '2024-01-08',
     categoryId: 'llm-architecture',
-    categoryName: '大模型架构',
+    categoryName: 'Architecture',
     generatedAt: '2024-01-08T00:00:00.000Z',
     configHash: 'abc',
     candidateCount: 5,
@@ -31,7 +31,7 @@ const document = (papers: ClassifiedPaper[], overrides: Partial<DigestDocument> 
 describe('MarkdownRenderer', () => {
     it('renders the header with window, generation time, config hash and counts', () => {
         const out = new MarkdownRenderer().render(document([paper()], { candidateCount: 7 }));
-        expect(out).toContain('# Weekly arXiv Digest: 2024-W01 — 大模型架构');
+        expect(out).toContain('# Weekly arXiv Digest: 2024-W01 — Architecture');
         expect(out).toContain('- Window: 2024-01-01 to 2024-01-08 (UTC)');
         expect(out).toContain('- Generated: 2024-01-08T00:00:00.000Z');
         expect(out).toContain('- Config hash: `abc`');
@@ -43,7 +43,7 @@ describe('MarkdownRenderer', () => {
         const out = new MarkdownRenderer().render(
             document([paper({ classification: { categories: ['llm-architecture'], tags: ['attention', 'state-space-model'] } })]),
         );
-        expect(out).toContain('- **Category:** 大模型架构');
+        expect(out).toContain('- **Category:** Architecture');
         expect(out).toContain('- **Tag:** `attention`, `state-space-model`');
         expect(out).toContain('- **Authors:** Alice Example, Bob Sample');
         expect(out).toContain('- **arXiv:** [2401.01234](https://arxiv.org/abs/2401.01234)');
@@ -62,7 +62,9 @@ describe('MarkdownRenderer', () => {
     it('does not emit scores or translations', () => {
         const out = new MarkdownRenderer().render(document([paper()]));
         expect(out).not.toContain('Score');
-        expect(out).not.toContain('中文');
+        // Category names come from the taxonomy, but the digest body itself
+        // must not contain translated output machinery.
+        expect(out).not.toContain('translation');
     });
 
     it('escapes Markdown-significant characters in external text', () => {

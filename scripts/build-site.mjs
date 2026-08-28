@@ -1,8 +1,10 @@
 /**
  * Build the static site into dist/site (gitignored): the web shell plus the
- * digests data tree. deploy-site.mjs then publishes dist/site to gh-pages.
- * No bundler: assets are copied verbatim; the Tailwind step runs separately
- * via `pnpm site:css` (chosen dist CSS is committed so Pages needs no build).
+ * JSON digest data tree. deploy-site.mjs then publishes dist/site to gh-pages.
+ * Only the JSON feed (json_directory) is shipped — Markdown output never
+ * reaches the published site. No bundler: assets are copied verbatim; the
+ * Tailwind step runs separately via `pnpm site:css` (chosen dist CSS is
+ * committed so Pages needs no build).
  */
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -10,12 +12,13 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const webDir = join(root, 'web');
-const digestsDir = join(root, 'digests');
+// The published feed tree: JSON documents + manifests produced by the
+// pipeline (config output.json_directory, default `digests-json`).
+const jsonDir = join(root, 'digests-json');
 const outDir = join(root, 'dist', 'site');
 
-const digestsDataDir = join(digestsDir);
-if (!existsSync(join(digestsDataDir, 'index.json'))) {
-    console.error('error: digests/index.json is missing; run `pnpm digest web build --week YYYY-Www` first');
+if (!existsSync(join(jsonDir, 'index.json'))) {
+    console.error('error: digests-json/index.json is missing; run `pnpm digest web build --week YYYY-Www` first');
     process.exit(1);
 }
 
@@ -27,8 +30,9 @@ mkdirSync(outDir, { recursive: true });
 cpSync(join(webDir, 'index.html'), join(outDir, 'index.html'));
 cpSync(join(webDir, 'assets'), join(outDir, 'assets'), { recursive: true });
 
-// Digest data: the whole digests/ tree (manifests + per-week JSON/Markdown).
-cpSync(digestsDataDir, join(outDir, 'digests'), { recursive: true });
+// Digest data: the whole json feed tree (manifests + per-week JSON docs),
+// copied under the same `digests/` URL path the viewer expects.
+cpSync(jsonDir, join(outDir, 'digests'), { recursive: true });
 
 // GitHub Pages must not run Jekyll on this tree.
 writeFileSync(join(outDir, '.nojekyll'), '', 'utf8');

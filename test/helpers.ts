@@ -3,12 +3,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, vi } from 'vitest';
+import { parseTaxonomy, type TopicTaxonomy } from '../src/topics.js';
 import { Store } from '../src/db.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const repoRoot = join(here, '..');
 
-export const repoTopicsPath = join(repoRoot, 'TOPICS.yaml');
+/**
+ * Tests must never depend on the repository TOPICS.yaml: a standalone English
+ * fixture keeps classification tests stable while the real vocabulary evolves.
+ */
+export const fixtureTopicsPath = join(here, 'fixtures', 'topics.yaml');
+
+/** Parsed fixture taxonomy (deterministic, independent of repo taxonomy edits). */
+export function fixtureTaxonomy(): TopicTaxonomy {
+    return parseTaxonomy(readFileSync(fixtureTopicsPath, 'utf8'));
+}
 
 export function makeStore(): { store: Store; dir: string; cleanup: () => void } {
     const dir = mkdtempSync(join(tmpdir(), 'weekly-digest-test-'));
@@ -33,14 +42,14 @@ export function makeStore(): { store: Store; dir: string; cleanup: () => void } 
 
 /**
  * Create a temp config directory containing the given config.yaml plus a copy
- * of the repository TOPICS.yaml, mirroring the default sibling layout that
- * loadConfig expects.
+ * of the fixture taxonomy, mirroring the default sibling layout that loadConfig
+ * expects. The repository TOPICS.yaml is intentionally not used here.
  */
 export function makeConfigDir(configYaml: string): { dir: string; file: string; cleanup: () => void } {
     const dir = mkdtempSync(join(tmpdir(), 'weekly-digest-config-'));
     const file = join(dir, 'config.yaml');
     writeFileSync(file, configYaml);
-    writeFileSync(join(dir, 'TOPICS.yaml'), readFileSync(repoTopicsPath, 'utf8'));
+    writeFileSync(join(dir, 'TOPICS.yaml'), readFileSync(fixtureTopicsPath, 'utf8'));
     return {
         dir,
         file,

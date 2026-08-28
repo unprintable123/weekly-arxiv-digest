@@ -25,9 +25,13 @@ output:
   directory: "digests"
   # Each week's Markdown files are written into a "YYYY-Www" subfolder.
   subdirectory: "{week}"
-  # One Markdown file per week and per classification category. A same-name
-  # .json twin (static-site feed) plus manifest files are written alongside.
+  # One Markdown file per week and per classification category, written to
+  # output.directory. The JSON twin (static-site feed) with the same basename
+  # is written to a separate tree so a repository can publish JSON only.
   filename: "weekly-{week}-{category}.md"
+  # JSON feed directory: weekly-*.json + manifests live here (default
+  # "digests-json"); the static-site build publishes this tree.
+  json_directory: "digests-json"
 
 llm:
   # Classification worker: an OpenAI-compatible chat completion endpoint.

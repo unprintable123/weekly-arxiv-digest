@@ -59,11 +59,15 @@ const schema = z.strictObject({
       // string keeps a single-level output layout.
       subdirectory: z.string().default('{week}'),
       filename: z.string().default('weekly-{week}-{category}.md'),
+      // Directory for the JSON twins (static-site feed). Keeping JSON separate
+      // from the Markdown output lets a repository publish JSON only.
+      json_directory: z.string().default('digests-json'),
     })
     .default({
       directory: 'digests',
       subdirectory: '{week}',
       filename: 'weekly-{week}-{category}.md',
+      json_directory: 'digests-json',
     }),
   llm: z
     .strictObject({

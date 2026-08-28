@@ -17,15 +17,38 @@ pnpm digest cache clear-classifications [--older-than DAYS]
 
 ## Static site (GitHub Pages)
 
-Every run also writes a `.json` twin next to each Markdown file, plus two derived manifests (`digests/<week>/index.json` and `digests/index.json`). The static viewer in `web/` (vanilla ES module + Tailwind CSS) reads those files and renders a filterable paper list per week and category with `?week=&category=` URL state.
+Each run writes a `.json` twin for every Markdown digest into the separate JSON feed tree (`output.json_directory`, default `digests-json/`), plus two derived manifests (`digests-json/<week>/index.json` and `digests-json/index.json`). The static viewer in `web/` (vanilla ES module + Tailwind CSS) reads only those JSON files and renders a filterable paper list per week, group and category with `?week=&category=` URL state. Markdown output never reaches the published site — gh-pages contains only the JSON feed and the viewer shell.
 
 ```bash
 pnpm site:css       # rebuild web/assets/app.css after editing Tailwind classes
-pnpm site:build     # web/ + digests/ -> dist/site (includes .nojekyll)
+pnpm site:build     # web/ + digests-json/ -> dist/site (includes .nojekyll)
 pnpm site:deploy    # publish dist/site to the gh-pages branch and push
 ```
 
-`web build --week` backfills a week's JSON data offline from the cached papers and classifications (no network, no LLM); the week must have been `run` before. To publish: enable GitHub Pages → Deploy from branch → `gh-pages` / `(root)`, then ship updates with `pnpm site:deploy` after each run. Links on the site are restricted to arxiv.org and papers.cool, identical to the Markdown whitelist.
+`web build --week` backfills a week's JSON data offline from the cached papers and classifications (no network, no LLM); the week must have been `run` before.
+
+### Deploying to GitHub Pages
+
+1. **One-time repository setup** — on GitHub open Settings → Pages → Build and deployment → Source: **Deploy from a branch**, then choose Branch `gh-pages` and Folder `/ (root)`. (The first `pnpm site:deploy` creates the `gh-pages` branch automatically via an orphan commit; you can enable Pages before or after that first publish.)
+2. **Daily publish loop** after each successful digest run:
+
+   ```bash
+   pnpm digest run                       # crawl + classify (also writes the JSON twins)
+   pnpm digest web build --week 2026-W34 # optional: rebuild one week's JSON offline
+   pnpm site:deploy                      # site:build + push dist/site to gh-pages
+   ```
+
+   `pnpm site:deploy` is idempotent: it mirrors `dist/site` into a temporary git worktree of `gh-pages`, commits only when content actually changed, pushes, and removes the worktree. When nothing changed it reports `pushed: false` without touching the remote.
+
+3. **Custom remote/branch** (optional) — override the defaults without editing scripts:
+
+   ```bash
+   GH_PAGES_REMOTE=upstream GH_PAGES_BRANCH=pages pnpm site:deploy
+   ```
+
+4. **Verify** — the site URL appears under Settings → Pages once the first deployment finishes; assets use relative paths, so project pages under `https://<user>.github.io/<repo>/` work out of the box.
+
+Links on the site are restricted to arxiv.org and papers.cool, identical to the Markdown whitelist; all dynamic text is inserted via `textContent`, and papers.cool URLs are constructed from arXiv IDs only.
 
 ## Configuration
 
@@ -42,6 +65,6 @@ Then set `llm.model` in `config.yaml` to a model ID returned by the endpoint's `
 
 ## Output and storage
 
-Each weekly run writes one Markdown file per non-empty classification category plus a `.json` twin (same basename) and two derived manifests to `output.directory/<week>` (for example `digests/2026-W34/`) using `output.filename` (default `weekly-{week}-{category}.md`). `output.subdirectory` (default `{week}`) controls the week subfolder; empty it for a single-level layout. A paper with a primary and a secondary category appears in both files, always with its arXiv link and the mirror link `https://papers.cool/arxiv/<id>` built from the arXiv ID. Classification failures are reported through JSON log lines and a non-zero exit code; failed papers are simply retried by running the digest again. `preview` rebuilds the digest views offline from the stored `papers` and `classification_cache` rows (no network or LLM calls); a week must have been run before it can be previewed. Classification results are cached in `.cache/weekly-digest.sqlite` keyed by paper content, taxonomy hash, prompt version, client version, model, and endpoint, so taxonomy/prompt/model changes automatically invalidate old entries and repeat runs are byte-identical with no new network or LLM traffic. The SQLite cache is powered by `sql.js` (SQLite compiled to WebAssembly, so installation does not require native compilation); the database lives in memory and is written to disk every 100 new classifications plus at stage boundaries, while cache-hit reads perform no disk IO. Use `pnpm digest cache clear-classifications` to delete the stored classification cache (all of it, or only entries older than `--older-than DAYS`) when you want papers re-classified. Requests use a fixed User-Agent, timeout, retry, and delay. Review papers.cool/arXiv terms and robots rules before scheduling recurring runs.
+Each weekly run writes one Markdown file per non-empty classification category to `output.directory/<week>` (for example `digests/2026-W34/`) and a `.json` twin with the same basename into the separate JSON feed tree `output.json_directory/<week>` (default `digests-json/`), together with the JSON-only manifests (`index.json` at both levels). `output.filename` (default `weekly-{week}-{category}.md`) and `output.subdirectory` (default `{week}`; empty for a single-level layout) apply to both trees. This split lets a repository publish the JSON feed (e.g. to GitHub Pages) while keeping Markdown output local or gitignored. A paper with a primary and a secondary category appears in both files, always with its arXiv link and the mirror link `https://papers.cool/arxiv/<id>` built from the arXiv ID. Classification failures are reported through JSON log lines and a non-zero exit code; failed papers are simply retried by running the digest again. `preview` rebuilds the digest views offline from the stored `papers` and `classification_cache` rows (no network or LLM calls); a week must have been run before it can be previewed. Classification results are cached in `.cache/weekly-digest.sqlite` keyed by paper content, prompt version, client version, model, and endpoint (the topic taxonomy is deliberately excluded from the key, so editing `TOPICS.yaml` never re-classifies cached papers — only `digest cache clear-classifications` does), and repeat runs are byte-identical with no new network or LLM traffic. The SQLite cache is powered by `sql.js` (SQLite compiled to WebAssembly, so installation does not require native compilation); the database lives in memory and is written to disk every 100 new classifications plus at stage boundaries, while cache-hit reads perform no disk IO. Use `pnpm digest cache clear-classifications` to delete the stored classification cache (all of it, or only entries older than `--older-than DAYS`) when you want papers re-classified. Requests use a fixed User-Agent, timeout, retry, and delay. Review papers.cool/arXiv terms and robots rules before scheduling recurring runs.
 
 Use `--debug` to emit detailed crawler JSON lines on stderr, including HTTP cache hits, request attempts/status/timing, retries, pagination counts, candidate counts, and arXiv fallback results for list items missing an abstract. These events never include response bodies or abstracts; stdout remains reserved for the command result.

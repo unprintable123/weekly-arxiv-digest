@@ -304,12 +304,19 @@ export class Store {
     );
   }
 
-  latestClassification(id: string): ClassificationResult | undefined {
-    const row = this.db
-      .prepare(
-        'SELECT * FROM classification_cache WHERE arxiv_id=? AND status="ok" ORDER BY created_at DESC LIMIT 1',
-      )
-      .get(id) as any;
+  /**
+   * Latest "ok" classification for a paper. When `contentHash` is given, only
+   * rows whose stored content hash still matches are considered, so a paper
+   * whose abstract changed is never silently re-labeled with a stale result.
+   */
+  latestClassification(id: string, contentHash?: string): ClassificationResult | undefined {
+    const row = contentHash === undefined
+      ? this.db
+        .prepare('SELECT * FROM classification_cache WHERE arxiv_id=? AND status="ok" ORDER BY created_at DESC LIMIT 1')
+        .get(id)
+      : this.db
+        .prepare('SELECT * FROM classification_cache WHERE arxiv_id=? AND content_hash=? AND status="ok" ORDER BY created_at DESC LIMIT 1')
+        .get(id, contentHash);
     return (
       row && {
         categories: JSON.parse(row.categories_json),

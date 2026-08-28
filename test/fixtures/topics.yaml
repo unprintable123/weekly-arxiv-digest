@@ -1,0 +1,61 @@
+# Self-contained English taxonomy used exclusively by the test-suite so the
+# tests never depend on (or break with) edits to the repository TOPICS.yaml.
+# Topic ids mirror the ones the pipeline tests classify into.
+version: 1
+kind: topic-taxonomy
+
+rules:
+  id_pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+  tag_pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+  max_categories: 2
+  max_tags: 3
+  primary_required: true
+  unknown_topic: other
+  classification_input:
+    - title
+    - abstract_en
+    - topic_catalog
+  classification_output:
+    categories: topic ids, ordered primary then optional secondary
+    tags: lowercase kebab-case strings
+
+precedence:
+  - test-architecture > test-training
+
+groups:
+  - id: core
+    name: Core Models
+    topics:
+      - id: test-architecture
+        name: Architecture
+        description: Transformer structure innovations, attention variants and MoE layouts.
+        tags: [transformer, attention, mixture-of-experts]
+      - id: test-training
+        name: Training
+        description: Pretraining objectives, finetuning and optimization recipes.
+        tags: [pretraining, optimizer]
+      - id: test-reasoning
+        name: Reasoning
+        description: Chain-of-thought and other inference-time reasoning capabilities.
+        tags: [chain-of-thought, planning]
+  - id: applications
+    name: Applications
+    topics:
+      - id: test-retrieval
+        name: Retrieval
+        description: Retrieval-augmented generation and query understanding.
+        tags: [retrieval]
+      - id: test-translation
+        name: Translation
+        description: Machine translation quality and decoding.
+        tags: [machine-translation]
+      - id: other
+        name: Other
+        description: Papers that fit none of the catalog topics.
+        tags: [unclassified]
+
+aliases:
+  - from: arch
+    to: test-architecture
+  - from: machine-translation
+    to: test-translation

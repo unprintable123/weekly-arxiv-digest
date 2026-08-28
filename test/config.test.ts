@@ -25,6 +25,7 @@ describe('loadConfig', () => {
         expect(cfg.output.filename).toBe('weekly-{week}-{category}.md');
         expect(cfg.output.directory).toBe('digests');
         expect(cfg.output.subdirectory).toBe('{week}');
+        expect(cfg.output.json_directory).toBe('digests-json');
         expect(cfg.llm.max_retries).toBe(2);
         expect(cfg.window.timezone).toBe('UTC');
         expect(cfg.topics.topics.other).toBeDefined();

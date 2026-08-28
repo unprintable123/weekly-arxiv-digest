@@ -2,11 +2,11 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { loadConfig, type Config } from '../src/config.js';
+import { loadConfig } from '../src/config.js';
 import { Logger } from '../src/log.js';
 import { previewDigest, runDigest, type RunResult } from '../src/pipeline.js';
 import { weekWindow } from '../src/window.js';
-import { fixture, repoTopicsPath, routeContains, stubFetch } from './helpers.js';
+import { fixture, fixtureTopicsPath, routeContains, stubFetch } from './helpers.js';
 
 const configYaml = `
 categories: ["cs.LG"]
@@ -33,10 +33,10 @@ function makeRoot(): string {
     return mkdtempSync(join(tmpdir(), 'weekly-digest-pipeline-'));
 }
 
-async function loadRootConfig(root: string): Promise<Config> {
+function loadRootConfig(root: string) {
     const file = join(root, 'config.yaml');
     writeFileSync(file, configYaml);
-    copyFileSync(repoTopicsPath, join(root, 'TOPICS.yaml'));
+    copyFileSync(fixtureTopicsPath, join(root, 'TOPICS.yaml'));
     return loadConfig(file);
 }
 
@@ -48,14 +48,14 @@ function setupInvoker(overrides: { attention?: string[]; moe?: string[] } = {}) 
             if (prompt.includes('Attention Is All You Need')) {
                 entries.push({
                     id: '2401.01234',
-                    categories: overrides.attention ?? ['llm-architecture', 'physics-of-llm'],
-                    tags: ['attention', 'linear-attention'],
+                    categories: overrides.attention ?? ['test-architecture', 'test-training'],
+                    tags: ['attention', 'transformer'],
                 });
             }
             if (prompt.includes('Mixture of Experts')) {
                 entries.push({
                     id: '2401.01235',
-                    categories: overrides.moe ?? ['llm-architecture'],
+                    categories: overrides.moe ?? ['test-architecture'],
                     tags: ['mixture-of-experts'],
                 });
             }
@@ -94,39 +94,40 @@ describe('runDigest', () => {
             const result = await runDigest(cfg, window(), { root, invoker });
             expect(result.errors).toBe(0);
             expect(result.status).toBe('ok');
-            // llm-architecture gets both papers; physics-of-llm only the primary one.
+            // test-architecture gets both papers; test-training only the primary one.
             expect(result.documents.map((document) => document.categoryId)).toEqual([
-                'llm-architecture',
-                'physics-of-llm',
+                'test-architecture',
+                'test-training',
             ]);
-            // Markdown + JSON twin per category (2脳2), and the web-output
+            // Markdown files + JSON twins (2 x 2), and the web-output
             // block below asserts the json pair + manifests in detail.
             expect(result.files).toHaveLength(4);
             expect(result.files.every((file) => file.endsWith('.md') || file.endsWith('.json'))).toBe(true);
             expect(result.files.filter((file) => file.endsWith('.md')).map((file) => file.split('\\').pop() ?? file)).toEqual([
-                'weekly-2024-W01-llm-architecture.md',
-                'weekly-2024-W01-physics-of-llm.md',
+                'weekly-2024-W01-test-architecture.md',
+                'weekly-2024-W01-test-training.md',
             ]);
-            // Two-level layout: each week's files live in a "YYYY-Www" subfolder.
-            expect(result.files.every((file) => file.includes(join('digests', '2024-W01')))).toBe(true);
+            // Two-level layout: each week's files live in a "YYYY-Www" subfolder —
+            // markdown under output.directory, json under output.json_directory.
+            expect(result.files.filter((file) => file.endsWith('.md')).every((file) => file.includes(join('digests', '2024-W01')))).toBe(true);
+            expect(result.files.filter((file) => file.endsWith('.json')).every((file) => file.includes(join('digests-json', '2024-W01')))).toBe(true);
             expect(result.files.every((file) => existsSync(file))).toBe(true);
 
-            const architecture = contentFor(result, 'llm-architecture');
+            const architecture = contentFor(result, 'test-architecture');
             expect(architecture).toContain('## Attention Is All You Need: A Study of Scalable Attention');
             expect(architecture).toContain('## Mixture of Experts Revisited');
-            expect(architecture).toContain('- **Category:** 大模型架构');
-            expect(architecture).toContain('- **Tag:** `attention`, `linear-attention`');
+            // Chinese topic names are a taxonomy concern; the digest only asserts ids.
+            expect(architecture).toContain('- **Category:** test-architecture'.replace('test-architecture', 'Architecture'));
+            expect(architecture).toContain('- **Tag:** `attention`, `transformer`');
             expect(architecture).toContain('- **Authors:** Alice Example, Bob Sample');
             expect(architecture).toContain('[2401.01234](https://arxiv.org/abs/2401.01234)');
             expect(architecture).toContain('- **papers.cool:** [2401.01234](https://papers.cool/arxiv/2401.01234)');
             expect(architecture).not.toContain('Source:');
             expect(architecture).not.toContain('Score');
-            expect(architecture).not.toContain('中文');
 
-            const physics = contentFor(result, 'physics-of-llm');
-            expect(physics).toContain('# Weekly arXiv Digest: 2024-W01 — 大模型训练物理与涌现规律');
-            expect(physics).toContain('## Attention Is All You Need: A Study of Scalable Attention');
-            expect(physics).not.toContain('Mixture of Experts');
+            const training = contentFor(result, 'test-training');
+            expect(training).toContain('## Attention Is All You Need: A Study of Scalable Attention');
+            expect(training).not.toContain('Mixture of Experts');
 
             // Papers and classifications are cached for repeat runs and preview.
             const { Store } = await import('../src/db.js');
@@ -147,7 +148,7 @@ describe('runDigest', () => {
         const root = makeRoot();
         try {
             const cfg = await loadRootConfig(root);
-            const invoker = setupInvoker({ attention: ['llm-architecture'], moe: ['llm-architecture'] });
+            const invoker = setupInvoker({ attention: ['test-architecture'], moe: ['test-architecture'] });
             stubCrawl();
 
             const result = await runDigest(cfg, window(), { root, invoker });
@@ -193,7 +194,32 @@ describe('runDigest', () => {
         }
     });
 
-    it('invalidates classification cache when the taxonomy hash changes', async () => {
+    it('keeps cached classifications when only the taxonomy hash changes', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+
+            const first = await runDigest(cfg, window(), { root, invoker });
+            const callsAfterFirst = invoker.complete.mock.calls.length;
+            expect(callsAfterFirst).toBeGreaterThan(0);
+
+            // A TOPICS.yaml edit (here: hash only) must NOT invalidate the
+            // classification cache; only an explicit cache clear re-classifies.
+            cfg.topics = { ...cfg.topics, hash: `${cfg.topics.hash}-changed` };
+            const second = await runDigest(cfg, window(), { root, invoker });
+            expect(invoker.complete.mock.calls.length).toBe(callsAfterFirst);
+            expect(second.errors).toBe(0);
+            expect(second.documents.map((document) => document.categoryId)).toEqual(
+                first.documents.map((document) => document.categoryId),
+            );
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('reuses cache rows written under an older key format by content-hash fallback', async () => {
         const root = makeRoot();
         try {
             const cfg = await loadRootConfig(root);
@@ -202,12 +228,32 @@ describe('runDigest', () => {
 
             await runDigest(cfg, window(), { root, invoker });
             const callsAfterFirst = invoker.complete.mock.calls.length;
+            expect(callsAfterFirst).toBeGreaterThan(0);
 
-            // Any taxonomy change (here: hash only, as produced by a TOPICS.yaml
-            // edit) must produce fresh classification cache keys.
-            cfg.topics = { ...cfg.topics, hash: `${cfg.topics.hash}-changed` };
-            await runDigest(cfg, window(), { root, invoker });
-            expect(invoker.complete.mock.calls.length).toBe(callsAfterFirst * 2);
+            // Simulate cache rows written under an older key derivation (e.g.
+            // taxonomy-bearing keys from before this format): rewrite every
+            // classification row's key with a sentinel suffix so the exact-key
+            // lookup misses and the content-hash fallback must recover them.
+            const { Store } = await import('../src/db.js');
+            const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
+            try {
+                const keys = (store.db
+                    .prepare('SELECT cache_key FROM classification_cache')
+                    .all() as any[]).map((row) => row.cache_key);
+                expect(keys.length).toBeGreaterThan(0);
+                for (const key of keys) {
+                    store.db
+                        .prepare('UPDATE classification_cache SET cache_key=? WHERE cache_key=?')
+                        .run(`${key}-legacy`, key);
+                }
+            } finally {
+                store.close();
+            }
+
+            const second = await runDigest(cfg, window(), { root, invoker });
+            expect(invoker.complete.mock.calls.length).toBe(callsAfterFirst);
+            expect(second.errors).toBe(0);
+            expect(second.documents).toHaveLength(2);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -291,10 +337,10 @@ describe('runDigest', () => {
                     }
                     const entries: { id: string; categories: string[]; tags: string[] }[] = [];
                     if (wantsAttention) {
-                        entries.push({ id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] });
+                        entries.push({ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] });
                     }
                     if (wantsMoe) {
-                        entries.push({ id: '2401.01235', categories: ['llm-architecture'], tags: [] });
+                        entries.push({ id: '2401.01235', categories: ['test-architecture'], tags: [] });
                     }
                     return JSON.stringify(entries);
                 }),
@@ -338,12 +384,12 @@ describe('runDigest', () => {
                     if (failBatch) {
                         failBatch = false;
                         // Valid JSON but wrong shape: not a per-paper array.
-                        return '{"categories": ["llm-architecture"], "tags": []}';
+                        return '{"categories": ["test-architecture"], "tags": []}';
                     }
                     if (prompt.includes('Mixture of Experts')) {
-                        return JSON.stringify([{ id: '2401.01235', categories: ['llm-architecture'], tags: [] }]);
+                        return JSON.stringify([{ id: '2401.01235', categories: ['test-architecture'], tags: [] }]);
                     }
-                    return JSON.stringify([{ id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] }]);
+                    return JSON.stringify([{ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] }]);
                 }),
             };
             stubCrawl();
@@ -376,10 +422,10 @@ describe('runDigest', () => {
                     }
                     const entries: { id: string; categories: string[]; tags: string[] }[] = [];
                     if (prompt.includes('Attention Is All You Need')) {
-                        entries.push({ id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] });
+                        entries.push({ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'] });
                     }
                     if (prompt.includes('Mixture of Experts')) {
-                        entries.push({ id: '2401.01235', categories: ['llm-architecture'], tags: [] });
+                        entries.push({ id: '2401.01235', categories: ['test-architecture'], tags: [] });
                     }
                     return JSON.stringify(entries);
                 }),
@@ -426,13 +472,13 @@ describe('previewDigest', () => {
             const stripGenerated = (text: string): string =>
                 text.replace(/- Generated: .*/g, '- Generated: X');
             expect(stripGenerated(all.markdown)).toBe(
-                stripGenerated(contentFor(first, 'llm-architecture') + contentFor(first, 'physics-of-llm')),
+                stripGenerated(contentFor(first, 'test-architecture') + contentFor(first, 'test-training')),
             );
 
-            const one = previewDigest(root, cfg, '2024-W01', 'llm-architecture');
+            const one = previewDigest(root, cfg, '2024-W01', 'test-architecture');
             expect(one.documents).toHaveLength(1);
-            expect(one.documents[0].categoryId).toBe('llm-architecture');
-            expect(stripGenerated(one.markdown)).toBe(stripGenerated(contentFor(first, 'llm-architecture')));
+            expect(one.documents[0].categoryId).toBe('test-architecture');
+            expect(stripGenerated(one.markdown)).toBe(stripGenerated(contentFor(first, 'test-architecture')));
 
             // Preview never calls the agent or the network.
             expect(invoker.complete.mock.calls.length).toBe(agentCalls);
@@ -455,34 +501,37 @@ describe('web output', () => {
             stubCrawl();
 
             const result = await runDigest(cfg, window(), { root, invoker });
-            const weekDir = join(root, 'digests', '2024-W01');
+            const jsonDir = join(root, 'digests-json', '2024-W01');
             const jsonFiles = result.files.filter((file) => file.endsWith('.json'));
             expect(jsonFiles).toHaveLength(2);
             for (const file of jsonFiles) {
-                expect(file.startsWith(weekDir)).toBe(true);
+                expect(file.startsWith(jsonDir)).toBe(true);
                 expect(existsSync(file)).toBe(true);
             }
-            expect(existsSync(join(weekDir, 'index.json'))).toBe(true);
-            expect(existsSync(join(root, 'digests', 'index.json'))).toBe(true);
+            // Markdown lives in its own directory, JSON in the json_directory.
+            expect(result.files.filter((file) => file.endsWith('.md')).every((file) => file.startsWith(join(root, 'digests', '2024-W01')))).toBe(true);
+            expect(existsSync(join(jsonDir, 'index.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests-json', 'index.json'))).toBe(true);
 
             // Data twin carries the same paper content as the Markdown file.
-            const json = JSON.parse(readFileSync(join(weekDir, 'weekly-2024-W01-llm-architecture.json'), 'utf8')) as {
+            const json = JSON.parse(readFileSync(join(jsonDir, 'weekly-2024-W01-test-architecture.json'), 'utf8')) as {
                 categoryId: string;
                 papers: Array<{ arxivId: string; classification: { tags: string[] } }>;
             };
-            expect(json.categoryId).toBe('llm-architecture');
+            expect(json.categoryId).toBe('test-architecture');
             expect(json.papers.map((paper) => paper.arxivId).sort()).toEqual(['2401.01234', '2401.01235']);
             expect(json.papers.some((paper) => paper.classification.tags.includes('attention'))).toBe(true);
 
-            // Week manifest: sorted ids with counts; global index lists the week.
-            const weekIndex = JSON.parse(readFileSync(join(weekDir, 'index.json'), 'utf8')) as {
-                categories: Array<{ id: string; count: number }>;
+            // Week manifest: sorted ids with counts + taxonomy group metadata;
+            // global index lists the week.
+            const weekIndex = JSON.parse(readFileSync(join(jsonDir, 'index.json'), 'utf8')) as {
+                categories: Array<{ id: string; name: string; count: number; groupId?: string; groupName?: string }>;
             };
             expect(weekIndex.categories).toEqual([
-                { id: 'llm-architecture', name: '大模型架构', count: 2 },
-                { id: 'physics-of-llm', name: '大模型训练物理与涌现规律', count: 1 },
+                { id: 'test-architecture', name: 'Architecture', count: 2, groupId: 'core', groupName: 'Core Models' },
+                { id: 'test-training', name: 'Training', count: 1, groupId: 'core', groupName: 'Core Models' },
             ]);
-            const siteIndex = JSON.parse(readFileSync(join(root, 'digests', 'index.json'), 'utf8')) as {
+            const siteIndex = JSON.parse(readFileSync(join(root, 'digests-json', 'index.json'), 'utf8')) as {
                 weeks: Array<{ week: string }>;
             };
             expect(siteIndex.weeks.map((entry) => entry.week)).toEqual(['2024-W01']);
@@ -519,6 +568,7 @@ describe('web output', () => {
 
             await runDigest(cfg, window(), { root, invoker, dryRun: true });
             expect(existsSync(join(root, 'digests'))).toBe(false);
+            expect(existsSync(join(root, 'digests-json'))).toBe(false);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }
@@ -538,11 +588,11 @@ describe('web output', () => {
 
             const { buildWebDigests } = await import('../src/pipeline.js');
             const built = await buildWebDigests(root, cfg, '2024-W01');
-            expect(built.categories).toEqual(['llm-architecture', 'physics-of-llm']);
+            expect(built.categories).toEqual(['test-architecture', 'test-training']);
             expect(built.files).toHaveLength(4); // 2 category json + 2 manifests
-            expect(existsSync(join(root, 'digests', '2024-W01', 'weekly-2024-W01-physics-of-llm.json'))).toBe(true);
-            expect(existsSync(join(root, 'digests', '2024-W01', 'index.json'))).toBe(true);
-            expect(existsSync(join(root, 'digests', 'index.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests-json', '2024-W01', 'weekly-2024-W01-test-training.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests-json', '2024-W01', 'index.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests-json', 'index.json'))).toBe(true);
 
             // Backfill shares the preview code path: no new agent/network work.
             expect(invoker.complete.mock.calls.length).toBe(agentCalls);
@@ -551,10 +601,10 @@ describe('web output', () => {
             // generatedAt stamp) once the run has also written the twins.
             await runDigest(cfg, window(), { root, invoker });
             const direct = readFileSync(
-                join(root, 'digests', '2024-W01', 'weekly-2024-W01-llm-architecture.json'),
+                join(root, 'digests-json', '2024-W01', 'weekly-2024-W01-test-architecture.json'),
                 'utf8',
             );
-            const backfillFile = built.files.find((file) => file.endsWith('llm-architecture.json'));
+            const backfillFile = built.files.find((file) => file.endsWith('test-architecture.json'));
             expect(backfillFile).toBeTruthy();
             // generatedAt may differ between preview and run; compare content.
             const normalize = (text: string): string => text.replace(/"generatedAt":"[^"]*"/g, '');

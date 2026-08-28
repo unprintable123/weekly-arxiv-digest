@@ -6,5 +6,6 @@ dist
 *.sqlite
 .cache
 digests
+digests-json
 # site build artifacts
 dist/gh-pages-worktree

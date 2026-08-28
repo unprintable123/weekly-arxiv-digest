@@ -5,16 +5,21 @@
  */
 
 /** @typedef {{ version: 1, updatedAt: string, weeks: Array<{week: string, from: string, to: string}> }} SiteIndex */
-/** @typedef {{ version: 1, week: string, from: string, to: string, categories: Array<{id: string, name: string, count: number}> }} WeekIndex */
-/** @typedef {{ version: 1, week: string, from: string, to: string, categoryId: string, categoryName: string, generatedAt: string, configHash: string, candidateCount: number, papers: Array<object> }} WebDocument */
+/** @typedef {{ id: string, name: string, count: number, groupId?: string, groupName?: string }} WeekCategory */
+/** @typedef {{ version: 1, week: string, from: string, to: string, categories: Array<WeekCategory> }} WeekIndex */
+/** @typedef {{ version: 1, week: string, from: string, to: string, categoryId: string, categoryName: string, groupId?: string, groupName?: string, generatedAt: string, configHash: string, candidateCount: number, papers: Array<object> }} WebDocument */
 
 const state = {
     /** @type {SiteIndex | undefined} */
     siteIndex: undefined,
     /** @type {string | undefined} */
     week: undefined,
+    /** Derived from the selected category; not part of the URL state. */
+    group: undefined,
     /** @type {string | undefined} */
     category: undefined,
+    /** @type {WeekCategory[]} */
+    weekCategories: [],
     /** @type {WebDocument | undefined} */
     document: undefined,
 };
@@ -27,6 +32,7 @@ let searchPattern = (() => {
 
 const el = {
     weekSelect: document.getElementById('week-select'),
+    groupSelect: document.getElementById('group-select'),
     categorySelect: document.getElementById('category-select'),
     countBadge: document.getElementById('count-badge'),
     searchInput: document.getElementById('search-input'),
@@ -253,7 +259,10 @@ function renderMeta() {
     el.footerMeta.textContent = `generated ${webDocument.generatedAt} · config ${String(webDocument.configHash).slice(0, 12)} · doc v${webDocument.version}`;
     el.countBadge.textContent = `${state.document.papers?.length ?? 0} papers`;
     el.countBadge.classList.remove('hidden');
-    document.title = `${webDocument.week} · ${webDocument.categoryName} — Weekly arXiv Digest`;
+    // Document title keeps the Chinese category name (from the week index)
+    // while the selects show English ids.
+    const selected = (state.weekCategories ?? []).find((entry) => entry.id === webDocument.categoryId);
+    document.title = `${webDocument.week} · ${selected?.name ?? webDocument.categoryName} — Weekly arXiv Digest`;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,13 +320,20 @@ function stateFromUrl() {
 // Selects and event wiring
 // ---------------------------------------------------------------------------
 
-/** @param {HTMLSelectElement} select @param {Array<{value: string, label: string}>} options @param {string | undefined} selected */
+/**
+ * Fill a select. Option labels show the English id (taxonomy identifier); the
+ * optional `hint` (Chinese name) is attached as a native hover tooltip.
+ * @param {HTMLSelectElement} select
+ * @param {Array<{value: string, label: string, hint?: string}>} options
+ * @param {string | undefined} selected
+ */
 function fillSelect(select, options, selected) {
     select.replaceChildren(
         ...options.map((option) => {
             const node = document.createElement('option');
             node.value = option.value;
             node.textContent = option.label;
+            if (option.hint) node.title = option.hint;
             node.selected = option.value === selected;
             return node;
         }),
@@ -325,22 +341,71 @@ function fillSelect(select, options, selected) {
     select.value = selected ?? options[0]?.value ?? '';
 }
 
-/** Load the category list for the selected week and rebuild the picker. */
+const UNGROUPED = '__ungrouped__';
+
+/** Categories of the active group; legacy indexes without groups all land here. */
+function categoriesOfGroup(group) {
+    const all = state.weekCategories ?? [];
+    if (group === UNGROUPED) return all.filter((category) => !category.groupId);
+    return all.filter((category) => category.groupId === group);
+}
+
+/** Distinct groups in file order, preserving the taxonomy ordering. */
+function groupsOfCategories() {
+    const all = state.weekCategories ?? [];
+    const groups = [];
+    const seen = new Set();
+    for (const category of all) {
+        const id = category.groupId ?? UNGROUPED;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        groups.push({ id, name: category.groupName ?? id });
+    }
+    return groups;
+}
+
+/**
+ * Rebuild the group + category selects for the current week.
+ * @param {string | undefined} preferredCategory category to keep selected when present
+ */
+function renderPickers(preferredCategory) {
+    const groups = groupsOfCategories();
+    // Prefer the group of the requested category, else keep the current one.
+    const requested = (state.weekCategories ?? []).find((entry) => entry.id === preferredCategory);
+    const group = requested?.groupId ?? state.group ?? groups[0]?.id;
+    state.group = group;
+    const categories = categoriesOfGroup(group);
+    const category = categories.some((entry) => entry.id === preferredCategory)
+        ? preferredCategory
+        : categories[0]?.id;
+    state.category = category;
+    fillSelect(
+        el.groupSelect,
+        groups.map((entry) => ({
+            value: entry.id,
+            label: entry.id === UNGROUPED ? 'ungrouped' : entry.id,
+            hint: entry.id === UNGROUPED ? '' : entry.name,
+        })),
+        group,
+    );
+    fillSelect(
+        el.categorySelect,
+        categories.map((entry) => ({ value: entry.id, label: entry.id, hint: entry.name })),
+        category,
+    );
+}
+
+/** Load the category list for the selected week and rebuild the pickers. */
 async function loadWeekCategories() {
     try {
         const weekIndex = await loadWeekIndex(state.week);
-        const selected =
-            state.category && weekIndex.categories.some((category) => category.id === state.category)
-                ? state.category
-                : weekIndex.categories[0]?.id;
-        state.category = selected;
-        fillSelect(
-            el.categorySelect,
-            weekIndex.categories.map((category) => ({ value: category.id, label: `${category.name} (${category.count})` })),
-            selected,
-        );
+        state.weekCategories = weekIndex.categories ?? [];
+        if (!state.weekCategories.length) throw new Error('empty week index');
+        renderPickers(state.category);
     } catch {
         state.category = undefined;
+        state.weekCategories = [];
+        el.groupSelect.replaceChildren();
         el.categorySelect.replaceChildren();
         throw new Error('This week has no digest data (is the manifest deployed?).');
     }
@@ -405,8 +470,18 @@ el.weekSelect.addEventListener('change', () => {
         });
 });
 
+el.groupSelect.addEventListener('change', () => {
+    // Switching group re-derives the category list and selects its first entry.
+    state.group = el.groupSelect.value;
+    renderPickers(undefined);
+    syncUrl('pushState');
+    refresh();
+});
+
 el.categorySelect.addEventListener('change', () => {
     state.category = el.categorySelect.value;
+    const requested = (state.weekCategories ?? []).find((entry) => entry.id === state.category);
+    if (requested) state.group = requested.groupId ?? UNGROUPED;
     syncUrl('pushState');
     refresh();
 });

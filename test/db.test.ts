@@ -78,6 +78,10 @@ describe('classification cache', () => {
             expect(cached?.tags).toEqual(['attention']);
             expect(cached).not.toHaveProperty('raw');
             expect(store.latestClassification('2401.01234')?.categories).toEqual(['llm-architecture']);
+            // The content-hash filter keeps the row reusable for the same paper
+            // content but never reuses it once the paper content changed.
+            expect(store.latestClassification('2401.01234', 'hash-2401.01234')?.categories).toEqual(['llm-architecture']);
+            expect(store.latestClassification('2401.01234', 'different-content')).toBeUndefined();
         } finally {
             cleanup();
         }
