@@ -38,7 +38,7 @@ describe('buildClassificationPrompt', () => {
         expect(prompt).toContain(papers[1].title);
         expect(prompt).toContain(papers[0].abstractEn);
         expect(prompt).toContain('- llm-architecture: ');
-        expect(prompt).toContain('llm-physics');
+        expect(prompt).toContain('physics-of-llm');
         expect(prompt).toContain('Use "other" only when no other topic fits.');
         expect(prompt).toContain('JSON array');
         expect(prompt).toContain('id: 2401.01234');
@@ -67,10 +67,10 @@ describe('buildClassificationPrompt', () => {
 describe('normalizeClassification', () => {
     it('accepts canonical categories and keeps primary-first order', () => {
         const result = normalizeClassification(taxonomy, {
-            categories: ['llm-architecture', 'llm-physics'],
+            categories: ['llm-architecture', 'physics-of-llm'],
             tags: ['attention'],
         });
-        expect(result.categories).toEqual(['llm-architecture', 'llm-physics']);
+        expect(result.categories).toEqual(['llm-architecture', 'physics-of-llm']);
         expect(result.tags).toEqual(['attention']);
     });
 
@@ -283,13 +283,13 @@ describe('classifyPapers', () => {
             complete: vi.fn(async () =>
                 JSON.stringify([
                     { id: '2401.01234', categories: ['llm-architecture'], tags: ['attention'] },
-                    { id: '2401.01235', categories: ['llm-physics'], tags: [] },
+                    { id: '2401.01235', categories: ['physics-of-llm'], tags: [] },
                 ]),
             ),
         };
         const results = await classifyPapers(batch, taxonomy, agent, invoker);
         expect(results.get('2401.01234')?.categories).toEqual(['llm-architecture']);
-        expect(results.get('2401.01235')?.categories).toEqual(['llm-physics']);
+        expect(results.get('2401.01235')?.categories).toEqual(['physics-of-llm']);
         expect(results.get('2401.01234')).not.toHaveProperty('raw');
         expect(invoker.complete).toHaveBeenCalledTimes(1);
         const [prompt, options] = invoker.complete.mock.calls[0];

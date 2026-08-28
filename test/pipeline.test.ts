@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+﻿import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -48,7 +48,7 @@ function setupInvoker(overrides: { attention?: string[]; moe?: string[] } = {}) 
             if (prompt.includes('Attention Is All You Need')) {
                 entries.push({
                     id: '2401.01234',
-                    categories: overrides.attention ?? ['llm-architecture', 'llm-physics'],
+                    categories: overrides.attention ?? ['llm-architecture', 'physics-of-llm'],
                     tags: ['attention', 'linear-attention'],
                 });
             }
@@ -94,14 +94,19 @@ describe('runDigest', () => {
             const result = await runDigest(cfg, window(), { root, invoker });
             expect(result.errors).toBe(0);
             expect(result.status).toBe('ok');
-            // llm-architecture gets both papers; llm-physics only the primary one.
+            // llm-architecture gets both papers; physics-of-llm only the primary one.
             expect(result.documents.map((document) => document.categoryId)).toEqual([
                 'llm-architecture',
-                'llm-physics',
+                'physics-of-llm',
             ]);
-            expect(result.files).toHaveLength(2);
-            expect(result.files[0].endsWith('weekly-2024-W01-llm-architecture.md')).toBe(true);
-            expect(result.files[1].endsWith('weekly-2024-W01-llm-physics.md')).toBe(true);
+            // Markdown + JSON twin per category (2脳2), and the web-output
+            // block below asserts the json pair + manifests in detail.
+            expect(result.files).toHaveLength(4);
+            expect(result.files.every((file) => file.endsWith('.md') || file.endsWith('.json'))).toBe(true);
+            expect(result.files.filter((file) => file.endsWith('.md')).map((file) => file.split('\\').pop() ?? file)).toEqual([
+                'weekly-2024-W01-llm-architecture.md',
+                'weekly-2024-W01-physics-of-llm.md',
+            ]);
             // Two-level layout: each week's files live in a "YYYY-Www" subfolder.
             expect(result.files.every((file) => file.includes(join('digests', '2024-W01')))).toBe(true);
             expect(result.files.every((file) => existsSync(file))).toBe(true);
@@ -118,8 +123,8 @@ describe('runDigest', () => {
             expect(architecture).not.toContain('Score');
             expect(architecture).not.toContain('中文');
 
-            const physics = contentFor(result, 'llm-physics');
-            expect(physics).toContain('# Weekly arXiv Digest: 2024-W01 — LLM 物理与理论');
+            const physics = contentFor(result, 'physics-of-llm');
+            expect(physics).toContain('# Weekly arXiv Digest: 2024-W01 — 大模型训练物理与涌现规律');
             expect(physics).toContain('## Attention Is All You Need: A Study of Scalable Attention');
             expect(physics).not.toContain('Mixture of Experts');
 
@@ -421,7 +426,7 @@ describe('previewDigest', () => {
             const stripGenerated = (text: string): string =>
                 text.replace(/- Generated: .*/g, '- Generated: X');
             expect(stripGenerated(all.markdown)).toBe(
-                stripGenerated(contentFor(first, 'llm-architecture') + contentFor(first, 'llm-physics')),
+                stripGenerated(contentFor(first, 'llm-architecture') + contentFor(first, 'physics-of-llm')),
             );
 
             const one = previewDigest(root, cfg, '2024-W01', 'llm-architecture');
@@ -435,6 +440,133 @@ describe('previewDigest', () => {
             expect(() => previewDigest(root, cfg, '2024-W01', 'missing-category')).toThrow(/No snapshot/);
             expect(() => previewDigest(root, cfg, '1999-W01')).toThrow(/No cached papers/);
             expect(() => previewDigest(root, cfg, 'not-a-week')).toThrow(/Invalid week/);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('web output', () => {
+    it('writes a .json twin next to every .md plus week and global manifests', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+
+            const result = await runDigest(cfg, window(), { root, invoker });
+            const weekDir = join(root, 'digests', '2024-W01');
+            const jsonFiles = result.files.filter((file) => file.endsWith('.json'));
+            expect(jsonFiles).toHaveLength(2);
+            for (const file of jsonFiles) {
+                expect(file.startsWith(weekDir)).toBe(true);
+                expect(existsSync(file)).toBe(true);
+            }
+            expect(existsSync(join(weekDir, 'index.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests', 'index.json'))).toBe(true);
+
+            // Data twin carries the same paper content as the Markdown file.
+            const json = JSON.parse(readFileSync(join(weekDir, 'weekly-2024-W01-llm-architecture.json'), 'utf8')) as {
+                categoryId: string;
+                papers: Array<{ arxivId: string; classification: { tags: string[] } }>;
+            };
+            expect(json.categoryId).toBe('llm-architecture');
+            expect(json.papers.map((paper) => paper.arxivId).sort()).toEqual(['2401.01234', '2401.01235']);
+            expect(json.papers.some((paper) => paper.classification.tags.includes('attention'))).toBe(true);
+
+            // Week manifest: sorted ids with counts; global index lists the week.
+            const weekIndex = JSON.parse(readFileSync(join(weekDir, 'index.json'), 'utf8')) as {
+                categories: Array<{ id: string; count: number }>;
+            };
+            expect(weekIndex.categories).toEqual([
+                { id: 'llm-architecture', name: '大模型架构', count: 2 },
+                { id: 'physics-of-llm', name: '大模型训练物理与涌现规律', count: 1 },
+            ]);
+            const siteIndex = JSON.parse(readFileSync(join(root, 'digests', 'index.json'), 'utf8')) as {
+                weeks: Array<{ week: string }>;
+            };
+            expect(siteIndex.weeks.map((entry) => entry.week)).toEqual(['2024-W01']);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('keeps json twins byte-identical on cached replay (same generatedAt)', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+
+            const first = await runDigest(cfg, window(), { root, invoker });
+            const readJson = (files: string[]): string[] =>
+                files.filter((file) => file.endsWith('.json')).map((file) => readFileSync(file, 'utf8'));
+            const firstJson = readJson(first.files);
+
+            const second = await runDigest(cfg, window(), { root, invoker });
+            expect(readJson(second.files)).toEqual(firstJson);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('dry-run writes no json or manifest files', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+
+            await runDigest(cfg, window(), { root, invoker, dryRun: true });
+            expect(existsSync(join(root, 'digests'))).toBe(false);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    it('buildWebDigests backfills the site data offline from caches', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = setupInvoker();
+            stubCrawl();
+
+            const run = await runDigest(cfg, window(), { root, invoker, dryRun: true });
+            expect(run.files).toEqual([]);
+            // No json files were written by the dry run; backfill produces them.
+            const agentCalls = invoker.complete.mock.calls.length;
+
+            const { buildWebDigests } = await import('../src/pipeline.js');
+            const built = await buildWebDigests(root, cfg, '2024-W01');
+            expect(built.categories).toEqual(['llm-architecture', 'physics-of-llm']);
+            expect(built.files).toHaveLength(4); // 2 category json + 2 manifests
+            expect(existsSync(join(root, 'digests', '2024-W01', 'weekly-2024-W01-physics-of-llm.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests', '2024-W01', 'index.json'))).toBe(true);
+            expect(existsSync(join(root, 'digests', 'index.json'))).toBe(true);
+
+            // Backfill shares the preview code path: no new agent/network work.
+            expect(invoker.complete.mock.calls.length).toBe(agentCalls);
+
+            // The regenerated json matches the run-written json (modulo the
+            // generatedAt stamp) once the run has also written the twins.
+            await runDigest(cfg, window(), { root, invoker });
+            const direct = readFileSync(
+                join(root, 'digests', '2024-W01', 'weekly-2024-W01-llm-architecture.json'),
+                'utf8',
+            );
+            const backfillFile = built.files.find((file) => file.endsWith('llm-architecture.json'));
+            expect(backfillFile).toBeTruthy();
+            // generatedAt may differ between preview and run; compare content.
+            const normalize = (text: string): string => text.replace(/"generatedAt":"[^"]*"/g, '');
+            expect(normalize(direct)).toBe(normalize(readFileSync(backfillFile!, 'utf8')));
+
+            // Repeat backfill is byte-identical (stable ordering, same stamp
+            // within the same second is not guaranteed, so only the document
+            // shape minus generatedAt is compared).
+            const before = normalize(readFileSync(backfillFile!, 'utf8'));
+            const { buildWebDigests: rebuild } = await import('../src/pipeline.js');
+            await rebuild(root, cfg, '2024-W01');
+            expect(normalize(readFileSync(backfillFile!, 'utf8'))).toBe(before);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

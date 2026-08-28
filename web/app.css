@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Card content mirrors the Markdown digest fields; the clamp keeps long
+   abstracts scannable and expands on demand. */
+.abstract-clamp {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    overflow: hidden;
+}
+
+.abstract-open .abstract-clamp {
+    -webkit-line-clamp: unset;
+}

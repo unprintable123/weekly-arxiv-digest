@@ -24,8 +24,8 @@ precedence:
   - llm-architecture > llm-efficiency
   # multimodal-generation wins over diffusion-lm for image/video papers
   - multimodal-generation > diffusion-lm
-  # llm-physics wins over llm-training for scaling and training-dynamics theory
-  - llm-physics > llm-training
+  # physics-of-llm wins over llm-training for scaling and training-dynamics theory
+  - physics-of-llm > llm-training
 
 groups:
   - id: llm-core
@@ -37,10 +37,10 @@ groups:
         tags: [transformer, attention, state-space-model, mixture-of-experts, recurrent-model, positional-encoding, sparse-attention]
       - id: llm-training
         name: 大模型训练与微调
-        description: 预训练目标、SFT、参数高效微调、优化策略和训练配方；理论规律优先使用 llm-physics。
+        description: 预训练目标、SFT、参数高效微调、优化策略和训练配方；理论规律优先使用 physics-of-llm。
         tags: [pretraining, sft, parameter-efficient-finetuning, lora, continual-learning, optimizer]
-      - id: llm-physics
-        name: LLM 物理与理论
+      - id: physics-of-llm
+        name: 大模型训练物理与涌现规律
         description: 研究模型规模、训练过程和能力涌现等可解释规律的理论或经验工作。
         tags: [scaling-laws, training-dynamics, loss-landscape, optimization-stability, grokking, phase-transition]
       - id: llm-efficiency
@@ -96,8 +96,9 @@ groups:
         description: Agent 与环境交互的在线 RL、轨迹优化、策略学习和 tool-use RL。
         tags: [agentic-rl, online-learning, environment-interaction, trajectory-optimization, tool-use-rl, reward-design]
       - id: agent-safety
-        name: Agent 安全与权限
+        name: Agent 安全
         description: Agent 权限、沙箱、可控性、风险治理和安全执行；模型 jailbreak 使用 llm-safety。
+
         tags: [agent-safety, sandboxing, permission-control, prompt-injection, policy-enforcement, safe-execution]
       - id: skill-learning
         name: Skill 学习与组合

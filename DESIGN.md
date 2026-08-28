@@ -8,7 +8,7 @@
 
 必须输出的论文字段：标题、分类、作者、英文原始摘要、arXiv/papers.cool 链接。`tag` 是可选的分类细分结果，由 agent 从摘要中提取；没有 tag 时不输出该字段。
 
-非目标：下载或解析 PDF、使用正文筛选论文、LLM 打分/阈值过滤、LLM 翻译摘要、引用图谱、账号订阅服务、Web UI 和 HTML/CSS 展示。HTML 是 Markdown 版本稳定后再考虑的独立工作。
+非目标：下载或解析 PDF、使用正文筛选论文、LLM 打分/阈值过滤、LLM 翻译摘要、引用图谱、账号订阅服务。静态站点输出按第 9 节的契约实现，是 Markdown 之后的第二个渲染目标；仍不做服务端渲染、不做 Web 框架、不做动态后端。
 
 ## 2. 技术栈与模块边界
 
@@ -24,8 +24,9 @@
 - `src/llm.ts`：通过 chat completion API 执行分类/tag 请求，并校验受控 JSON 返回值。
 - `src/db.ts`：持久化论文、抓取响应和分类结果；写入在内存累积，按固定节奏刷盘。
 - `src/pipeline.ts`：编排收集、分类、排序和输出，保证缓存命中时不重复调用网络或 agent。
-- `src/renderer.ts`：只消费领域对象并渲染 Markdown，不访问网络、数据库或 agent。
-- `src/cli.ts`：暴露 `run`、`preview` 和缓存管理命令，stdout 保持机器可读。
+- `src/renderer.ts`：只消费领域对象并渲染 Markdown/JSON，不访问网络、数据库或 agent。
+- `src/site.ts`：静态站点数据层——从输出目录派生两级 manifest 并原子写入 JSON；纯文件推导，不访问网络、数据库或 agent。
+- `src/cli.ts`：暴露 `run`、`preview`、`web build` 和缓存管理命令，stdout 保持机器可读。
 
 ## 3. 配置设计
 
@@ -150,6 +151,10 @@ pnpm digest preview --week 2026-W34 [--category TOPIC_ID] [--config config.yaml]
 pnpm digest cache stats
 pnpm digest cache prune [--older-than DAYS]
 pnpm digest cache clear-classifications [--older-than DAYS]
+pnpm digest web build --week YYYY-Www [--config config.yaml]
+pnpm site:css      # 生成 web/assets/app.css（提交进仓库）
+pnpm site:build    # web/ + digests/ -> dist/site
+pnpm site:deploy   # site:build 后把 dist/site 发布到 gh-pages 分支
 ```
 
 `run` 的 stdout 输出 `files`、`categories` 和 `stats`（无 run ID，因为不再记录运行行）。抓取或分类失败通过 JSON lines 日志报告并返回非零退出码；失败不会被写库，直接重新 `run` 即可重试（失败的论文没有缓存条目，会自动重新分类），`--force` 用于强制重新抓取和重新分类。
@@ -164,3 +169,29 @@ pnpm digest cache clear-classifications [--older-than DAYS]
 - 解析器使用 DOM/XML 解析器而非正则。网络源变化时通过 fixture 契约测试发现，不静默生成空 digest。
 - 固定 fixture、周窗口和 agent 分类结果时，重复运行输出字节一致；第二次运行不增加网络或 agent 调用。
 - 自动化测试覆盖分页、版本去重、摘要 fallback、分类 JSON 校验、topic/tag 约束、缓存命中/失效、失败重试、Markdown 转义和多 category 文件输出。
+
+## 9. 静态站点输出（gh-pages）
+
+Markdown 之外，每次 `run` 为每个 category document 额外写一个同名 `.json` 副本（`weekly-{week}-{category}.json`），内容由 `JsonRenderer` 用稳定键序 JSON 序列化（`stableJson`，键排序 + 尾部换行），因此与 Markdown 一样满足"重复运行字节一致"。JSON 保留文档头字段（week/from/to/generatedAt/configHash/candidateCount）与每篇论文的展示字段（arxivId/title/authors/abstractEn/publishedAt/categories/classification），不输出 `contentHash`、`detailUrl` 等内部字段；papers.cool 链接不落盘，由前端按 arXiv ID 以固定模板构造。
+
+两级 manifest 由文件系统扫描派生（`src/site.ts`），任何写入路径（run、`web build` 回填）之后都全量重建，不存在增量合并：
+
+- `digests/<week>/index.json`：该周 categories（id/name/count，按 id 排序），驱动类别选择器与数量徽章；
+- `digests/index.json`：所有含有效周 index 的周（week/from/to，按周倒序），驱动周选择器。
+
+损坏或缺失的 JSON 文件在扫描时被跳过（解析失败视为不存在），一个坏文件不会破坏站点。JSON 写入与 Markdown 相同：临时文件 + 原子 rename。
+
+`web build --week YYYY-Www` 离线回填某周的站点数据：走 `preview` 的缓存重建路径（只读 `papers` + `classification_cache`，不访问网络与 agent），重写该周 JSON 与两级 manifest。前提是该周已成功 `run` 过且分类缓存未被清除。
+
+### 9.1 站点前端（web/ → dist/site）
+
+`web/` 是无框架静态源码：`index.html` + `assets/app.js`（原生 ES module）+ `app.css`（Tailwind v4 入口）。`pnpm site:css` 用 tailwindcss CLI 产出压缩后的 `assets/app.css`；`pnpm site:build` 把 `web/` 与 `digests/` 数据树拷贝为发布产物 `dist/site`（含 `.nojekyll`）。前端行为契约：
+
+- 页面只消费 JSON 文件；全部动态文本经 `textContent`/`createElement` 插入，不使用 `innerHTML`；
+- 链接白名单与 Markdown 渲染器一致：仅 `https://arxiv.org/`（含 export 镜像归一化）与 `https://papers.cool/`，其余一律降级为纯文本；papers.cool 链接由 arXiv ID 前端构造；
+- URL 状态用 query 参数（`?week=YYYY-Www&category=<id>`）：选择变化 `pushState`，前进/后退由 `popstate` 恢复；首次加载无参数时取最新周与首个类别并 `replaceState` 规范化；不使用 path 路由（Pages 静态托管无 rewrite）；
+- 卡片字段与 Markdown 一致：标题、tag chips、Category/Authors/arXiv/papers.cool/Published、摘要（默认 4 行截断，可展开）；附客户端过滤框（标题/作者/摘要 substring，不参与 URL）与暗色模式（localStorage + `prefers-color-scheme`）。
+
+### 9.2 GitHub Pages 部署（gh-pages 分支）
+
+`pnpm site:deploy` = `site:build` + `scripts/deploy-site.mjs`：脚本在 `dist/gh-pages-worktree` 建临时 git worktree（分支已存在则检出，否则从 orphan 提交创建 `gh-pages`），把 `dist/site` 镜像为分支根目录，提交并推送（`GH_PAGES_REMOTE`/`GH_PAGES_BRANCH` 可覆盖默认 `origin`/`gh-pages`），最后移除 worktree。无内容变化时不推送。仓库侧一次性设置：Settings → Pages → Deploy from branch → `gh-pages` / `(root)`。日常发布流程：`pnpm digest run` →（可选 `pnpm digest web build`）→ `pnpm site:deploy`。站点资源全部使用相对路径，兼容项目页子路径。

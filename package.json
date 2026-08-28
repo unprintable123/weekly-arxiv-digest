@@ -12,7 +12,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "site:css": "tailwindcss -i web/app.css -o web/assets/app.css --minify",
+    "site:build": "node scripts/build-site.mjs",
+    "site:deploy": "pnpm site:build && node scripts/deploy-site.mjs"
   },
   "dependencies": {
     "cheerio": "^1.2.0",
@@ -25,6 +28,8 @@
   "devDependencies": {
     "@types/node": "^26.4.0",
     "@types/sql.js": "^1.4.11",
+    "@tailwindcss/cli": "^4.1.13",
+    "tailwindcss": "^4.1.13",
     "eslint": "^10.9.1",
     "tsx": "^4.23.12",
     "typescript": "^5.9.3",

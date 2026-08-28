@@ -1,3 +1,4 @@
+import { toWebDocument, stableJson } from './site.js';
 import type { DigestDocument, Renderer } from './types.js';
 
 const md = (s: string): string =>
@@ -48,5 +49,18 @@ export class MarkdownRenderer implements Renderer {
             out += `- **Published:** ${paper.publishedAt.slice(0, 10)}\n\n### Abstract\n\n${md(paper.abstractEn)}\n\n`;
         }
         return out;
+    }
+}
+
+/**
+ * Web viewer feed: same document content as the Markdown renderer, serialized
+ * as deterministic JSON. Rendering must stay pure: site.ts owns the atomic
+ * file write, this class only shapes the payload.
+ */
+export class JsonRenderer implements Renderer {
+    readonly extension = 'json';
+
+    render(document: DigestDocument): string {
+        return `${stableJson(toWebDocument(document))}\n`;
     }
 }

@@ -6,7 +6,7 @@ import { loadConfig } from './config.js';
 import { Store } from './db.js';
 import { Logger } from './log.js';
 import { ChatCompletionClient } from './llm.js';
-import { previewDigest, runDigest } from './pipeline.js';
+import { previewDigest, runDigest, buildWebDigests } from './pipeline.js';
 import { weekWindow } from './window.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -33,7 +33,8 @@ async function main(): Promise<void> {
         console.log(
             'pnpm digest run [--from YYYY-MM-DD --to YYYY-MM-DD] [--config config.yaml] [--force] [--dry-run] [--debug] [--trace FILE]\n' +
             'pnpm digest preview --week YYYY-Www [--category TOPIC_ID] [--config config.yaml]\n' +
-            'pnpm digest cache stats|prune [--older-than DAYS]|clear-classifications [--older-than DAYS]',
+            'pnpm digest cache stats|prune [--older-than DAYS]|clear-classifications [--older-than DAYS]\n' +
+            'pnpm digest web build --week YYYY-Www [--config config.yaml]',
         );
         return;
     }
@@ -102,6 +103,23 @@ async function main(): Promise<void> {
         const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
         const preview = previewDigest(root, cfg, value('--week') || '', value('--category'));
         process.stdout.write(preview.markdown.endsWith('\n') ? preview.markdown : `${preview.markdown}\n`);
+        return;
+    }
+
+    if (command === 'web') {
+        // Offline backfill of the static-site JSON feed for one week from the
+        // cached papers and classifications (no network, no agent calls).
+        if (args[1] !== 'build') throw new Error('Usage: web build --week YYYY-Www');
+        const cfg = await loadConfig(join(root, value('--config') || 'config.yaml'));
+        const result = await buildWebDigests(root, cfg, value('--week') || '');
+        console.log(
+            JSON.stringify({
+                week: result.week,
+                categories: result.categories,
+                files: result.files,
+                stats: { candidates: result.paperCount, candidates_included: result.paperCount },
+            }),
+        );
         return;
     }
 

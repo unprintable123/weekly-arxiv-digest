@@ -12,7 +12,8 @@ import {
     LLM_CLIENT_VERSION,
     type LlmInvoker,
 } from './llm.js';
-import { MarkdownRenderer } from './renderer.js';
+import { MarkdownRenderer, JsonRenderer } from './renderer.js';
+import { refreshManifests } from './site.js';
 import type {
     ClassifiedPaper,
     ClassificationResult,
@@ -371,21 +372,31 @@ export async function runDigest(
             );
             await mkdir(weekDir, { recursive: true });
             const renderer = new MarkdownRenderer();
+            const jsonRenderer = new JsonRenderer();
             const files: string[] = [];
             for (const document of documents) {
                 const markdown = renderer.render(document);
-                const file = join(
-                    weekDir,
-                    cfg.output.filename
-                        .replace('{week}', window.week)
-                        .replace('{category}', document.categoryId),
-                );
+                const webJson = jsonRenderer.render(document);
+                const base = cfg.output.filename
+                    .replace('{week}', window.week)
+                    .replace('{category}', document.categoryId);
+                const file = join(weekDir, base);
                 // Atomic write: temp file + rename so readers never see partial output.
                 const temporary = `${file}.tmp`;
                 await writeFile(temporary, markdown, 'utf8');
                 await rename(temporary, file);
                 files.push(file);
+                // Web twin: same basename with a .json extension, so Markdown
+                // and the static site always expose identical content.
+                const jsonFile = join(weekDir, `${base.slice(0, -(renderer.extension.length + 1))}.json`);
+                const jsonTemporary = `${jsonFile}.tmp`;
+                await writeFile(jsonTemporary, webJson, 'utf8');
+                await rename(jsonTemporary, jsonFile);
+                files.push(jsonFile);
             }
+            // Manifests are derived by scanning the written documents, so they
+            // stay correct no matter which subset of weeks/categories exists.
+            refreshManifests(outDir, window.week, generatedAt);
             logger.info('run_end', {
                 status,
                 candidates: papers.size,
@@ -424,6 +435,51 @@ export interface PreviewResult {
     week: string;
     markdown: string;
     documents: DigestDocument[];
+}
+
+export interface WebBuildResult {
+    week: string;
+    /** Written .json data files (one per category) + the two manifests. */
+    files: string[];
+    categories: string[];
+    paperCount: number;
+}
+
+/**
+ * Offline backfill of the static-site data for one week: rebuilds the
+ * documents from cached papers + classifications (like preview) and writes
+ * the .json twins plus the week and global manifests. No network, no agent.
+ */
+export async function buildWebDigests(
+    root: string,
+    cfg: Config,
+    week: string,
+): Promise<WebBuildResult> {
+    const preview = previewDigest(root, cfg, week);
+    const outDir = join(root, cfg.output.directory);
+    const weekDir = join(outDir, cfg.output.subdirectory.replace('{week}', week));
+    await mkdir(weekDir, { recursive: true });
+    const jsonRenderer = new JsonRenderer();
+    const files: string[] = [];
+    const markdownExtensionLength = new MarkdownRenderer().extension.length;
+    for (const document of preview.documents) {
+        const base = cfg.output.filename
+            .replace('{week}', week)
+            .replace('{category}', document.categoryId);
+        const file = join(weekDir, `${base.slice(0, -(markdownExtensionLength + 1))}.json`);
+        const temporary = `${file}.tmp`;
+        await writeFile(temporary, jsonRenderer.render(document), 'utf8');
+        await rename(temporary, file);
+        files.push(file);
+    }
+    refreshManifests(outDir, week, new Date().toISOString());
+    files.push(join(weekDir, 'index.json'), join(outDir, 'index.json'));
+    return {
+        week,
+        files,
+        categories: preview.documents.map((document) => document.categoryId),
+        paperCount: preview.documents[0]?.candidateCount ?? 0,
+    };
 }
 
 /**

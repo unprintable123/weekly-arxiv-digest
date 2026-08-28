@@ -18,8 +18,8 @@ The pipeline is deliberately layered:
 2. `src/crawler.ts` discovers and normalizes papers, handles pagination, versions, retries, rate limits, bounded detail requests, and HTTP response caching. It must never request PDFs.
 3. `src/llm.ts` owns the OpenAI-compatible chat completion client and fixed-template category/tag JSON validation. Prompts may use only the title, English abstract, and the controlled topic vocabulary.
 4. `src/db.ts` persists papers, fetches, and classification results in a cache-only store (no run/error-history tables; writes stay in memory and are flushed every 100 new classifications and at stage boundaries).
-5. `src/pipeline.ts` coordinates stages and cache keys, while `src/renderer.ts` renders a `DigestDocument` without doing I/O or calling an agent.
-6. `src/cli.ts` exposes `run`, `preview`, and `cache` commands and keeps stdout machine-readable.
+5. `src/pipeline.ts` coordinates stages and cache keys, while `src/renderer.ts` renders a `DigestDocument` without doing I/O or calling an agent; `src/site.ts` derives the static-site manifests from the output tree and atomically writes JSON (no network/DB/agent access).
+6. `src/cli.ts` exposes `run`, `preview`, `web build`, and `cache` commands and keeps stdout machine-readable.
 
 ## Repository Documents
 
@@ -66,7 +66,7 @@ The assistant must not:
 - Validate untrusted YAML and agent JSON with Zod or an equivalent structured parser. Normalize whitespace and arrays consistently; use `stableStringify`/`hash` when a value participates in a cache key.
 - Classification categories must be parsed from the controlled topic vocabulary and filtered to allowed IDs. Tags are lowercase hyphenated values with a maximum of three entries. The classification prompt is a fixed, versioned template; do not add personal-interest or user-supplied instruction fields.
 - When changing classification behavior, use the existing `TOPICS.yaml` vocabulary first. New topics require schema-valid YAML and human review; an agent must not invent unrestricted top-level categories in output.
-- Markdown output must escape external and agent text, whitelist `https://arxiv.org/` links, omit empty tag lines, and use atomic temporary-file writes. Renderers consume `DigestDocument` only.
+- Markdown output must escape external and agent text, whitelist `https://arxiv.org/` links, omit empty tag lines, and use atomic temporary-file writes. Renderers consume `DigestDocument` only. The web JSON twin follows the same whitelist: the viewer inserts text via `textContent` only, whitelists arxiv.org/papers.cool links, and builds papers.cool URLs from the arXiv ID.
 - Use bounded concurrency (`p-limit`), configured delay/timeouts, retries with backoff, and a fixed User-Agent for network work. Never log full prompts, abstracts, credentials, or agent responses at normal log levels.
 - Keep comments short and explain only non-obvious invariants. Do not reformat unrelated files or introduce dependency churn without a concrete need.
 
@@ -86,6 +86,10 @@ pnpm digest preview --week YYYY-Www [--config config.yaml]
 pnpm digest cache stats
 pnpm digest cache prune [--older-than DAYS]
 pnpm digest cache clear-classifications [--older-than DAYS]
+pnpm digest web build --week YYYY-Www [--config config.yaml]
+pnpm site:css
+pnpm site:build
+pnpm site:deploy
 ```
 
 `pnpm test` runs `test/**/*.test.ts` with Vitest in the Node environment. Tests should remain deterministic and must not depend on live papers.cool, arXiv, or model services.

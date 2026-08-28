@@ -113,7 +113,7 @@ describe('clearClassifications', () => {
             expect(store.clearClassifications(0)).toBe(1);
             expect(store.getClassification('k1')).toBeUndefined();
 
-            store.saveClassification('k2', paper('2401.01234'), model, result('llm-physics'));
+            store.saveClassification('k2', paper('2401.01234'), model, result('physics-of-llm'));
             expect(store.clearClassifications()).toBe(1);
             expect(store.getClassification('k2')).toBeUndefined();
             expect(store.stats().classifications).toBe(0);

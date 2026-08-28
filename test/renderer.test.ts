@@ -11,7 +11,7 @@ const paper = (overrides: Partial<ClassifiedPaper> = {}): ClassifiedPaper => ({
     publishedAt: '2024-01-02T00:00:00.000Z',
     detailUrl: 'https://arxiv.org/abs/2401.01234',
     contentHash: 'hash',
-    classification: { categories: ['llm-architecture', 'llm-physics'], tags: [] },
+    classification: { categories: ['llm-architecture', 'physics-of-llm'], tags: [] },
     ...overrides,
 });
 

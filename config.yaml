@@ -25,7 +25,8 @@ output:
   directory: "digests"
   # Each week's Markdown files are written into a "YYYY-Www" subfolder.
   subdirectory: "{week}"
-  # One Markdown file per week and per classification category.
+  # One Markdown file per week and per classification category. A same-name
+  # .json twin (static-site feed) plus manifest files are written alongside.
   filename: "weekly-{week}-{category}.md"
 
 llm:
