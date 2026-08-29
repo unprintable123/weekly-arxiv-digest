@@ -100,7 +100,7 @@ agent 必须返回一个 JSON 对象：
 }
 ```
 
-`categories` 至少一个且只能来自受控 topic ID；`tags` 可为空，最多 3 个，使用小写短横线格式；`tldr` 是一句简体中文总结（不超过 100 字，代码侧上限 200 字符），依据标题与英文摘要撰写、不得照抄摘要原文。无效 JSON、未知分类、空或超长 tldr、超时或服务错误按配置次数重试，最终失败写入错误表。没有评分，因此所有成功抓取且分类成功的论文都进入输出，不做 threshold 过滤。
+`categories` 至少一个且只能来自受控 topic ID；`tags` 可为空，最多 3 个，使用小写短横线格式；`tldr` 是一句简体中文总结（不超过 100 字，代码侧上限 200 字符），依据标题与英文摘要撰写、不得照抄摘要原文。无效 JSON、未知分类、空或超长 tldr、超时或服务错误按配置次数重试，最终失败写入错误表。供应商内容安全拒绝（HTTP 400，如 GLM 的 `OpenAIException` 提示输入或生成内容不安全/敏感）对同一篇论文是确定性的、重试必然再次失败：单篇逐篇重试仍命中该错误时，直接归入受控的 `other` 分类且 `tldr` 置空（渲染时省略 TLDR 行），不计入错误、也不落缓存，论文仍出现在 digest 中，后续运行可自动重试并恢复真实分类。没有评分，因此所有成功抓取且分类成功的论文都进入输出，不做 threshold 过滤。
 
 分类缓存 key 至少包含 arXiv ID、标题/摘要 hash、固定 prompt 版本、客户端版本、model 和端点。topic 词表 hash 有意不参与 key：编辑 TOPICS.yaml 不会使旧分类缓存失效，重分类只能通过 `digest cache clear-classifications` 显式触发。论文内容（标题/摘要）变化仍会使对应条目失效；精确 key 未命中时按 arXiv ID + 内容 hash 回退复用最新条目，兼容 key 格式变更前的旧缓存。
 
@@ -159,7 +159,7 @@ pnpm site:build    # web/ + digests-json/ -> dist/site
 pnpm site:deploy   # site:build 后把 dist/site 发布到 gh-pages 分支
 ```
 
-`run` 的 stdout 输出 `files`、`categories` 和 `stats`（无 run ID，因为不再记录运行行）。抓取或分类失败通过 JSON lines 日志报告并返回非零退出码；失败不会被写库，直接重新 `run` 即可重试（失败的论文没有缓存条目，会自动重新分类），`--force` 用于强制重新抓取和重新分类。
+`run` 的 stdout 输出 `files`、`categories` 和 `stats`（无 run ID，因为不再记录运行行）。抓取或分类失败通过 JSON lines 日志报告并返回非零退出码；失败不会被写库，直接重新 `run` 即可重试（失败的论文没有缓存条目，会自动重新分类），`--force` 用于强制重新抓取和重新分类。唯一例外是供应商内容安全拒绝（HTTP 400）：单篇逐篇重试仍命中时按 4.2 归入 `other` 并置空 `tldr`，不计入错误（`run` 仍返回成功），以 `classify_fallback` 事件记录。
 
 `run` 的 `--from`/`--to` 窗口可以跨多个 ISO 周：抓取与分类仍一次完成，但输出按每篇论文的 `published_at` 自动分片到各自 ISO 周（每周围目录、每周文档、每周 manifest 与 `generated_at` meta key），不会再整段塞进 from 周的 digest。某周没有成功分类的论文时不产生该周文件。
 

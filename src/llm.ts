@@ -23,6 +23,27 @@ export const CLASSIFICATION_BATCH_SIZE = 8;
  */
 export const LLM_CLIENT_VERSION = 'chat-completions-v1';
 
+/**
+ * Content-safety rejection markers returned by OpenAI-compatible providers
+ * (e.g. GLM/Zhipu) when input or generated content trips their safety filter.
+ * Matched against the surfaced error message only.
+ */
+const CONTENT_SAFETY_MARKERS = ['不安全', '敏感内容'];
+
+/**
+ * True when a chat completion failure is a provider content-safety refusal
+ * (HTTP 400, e.g. GLM's `OpenAIException`) rather than a transient service or
+ * parse error. Such refusals are deterministic for a given paper, so retrying
+ * keeps failing; the pipeline falls back to an "other" classification with an
+ * empty tldr instead of dropping the paper.
+ */
+export function isContentSafetyError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    if (!error.message.includes('HTTP 400')) return false;
+    const message = error.message.toLowerCase();
+    return CONTENT_SAFETY_MARKERS.some((marker) => message.includes(marker.toLowerCase()));
+}
+
 export interface LlmInvoker {
     complete(
         prompt: string,

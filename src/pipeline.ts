@@ -9,6 +9,7 @@ import {
     classifyPapers,
     CLASSIFICATION_BATCH_SIZE,
     CLASSIFICATION_PROMPT_VERSION,
+    isContentSafetyError,
     LLM_CLIENT_VERSION,
     type LlmInvoker,
 } from './llm.js';
@@ -329,6 +330,32 @@ export async function runDigest(
                                 cache_hit: false,
                             });
                         } catch (paperError) {
+                            // A provider content-safety refusal is deterministic
+                            // for this paper: retrying keeps failing, so classify
+                            // it as the controlled "other" topic with an empty
+                            // tldr (renderers omit the TLDR line) and keep it in
+                            // the digest instead of dropping it. The row is not
+                            // cached — an empty tldr stays a cache miss — so a
+                            // later run can still recover a real classification.
+                            if (isContentSafetyError(paperError)) {
+                                const fallback: ClassificationResult = {
+                                    categories: [taxonomy.rules.unknownTopic],
+                                    tags: [],
+                                    tldr: '',
+                                };
+                                results.set(paper.arxivId, fallback);
+                                newClassifications += 1;
+                                logClassifyProgress();
+                                logger.warn('classify_fallback', {
+                                    arxiv_id: paper.arxivId,
+                                    stage: 'classify',
+                                    reason: 'content_safety',
+                                    category: fallback.categories[0],
+                                    error_type: paperError instanceof Error ? paperError.name : 'Error',
+                                    error: paperError instanceof Error ? paperError.message : String(paperError),
+                                });
+                                continue;
+                            }
                             // A single classification failure must not lose the
                             // rest of the run, but the run still reports it.
                             errors += 1;

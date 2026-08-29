@@ -17,7 +17,11 @@ export type ClassificationResult = {
   categories: string[];
   /** Lowercase kebab-case tags, at most `max_tags`; may be empty. */
   tags: string[];
-  /** One-sentence Simplified-Chinese summary of the paper; non-empty. */
+  /**
+   * One-sentence Simplified-Chinese summary of the paper; empty only for
+   * pipeline fallbacks (e.g. a provider content-safety refusal routed to
+   * "other"), in which case renderers omit the TLDR line.
+   */
   tldr: string;
 };
 

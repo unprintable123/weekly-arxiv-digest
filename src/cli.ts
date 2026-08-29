@@ -61,7 +61,6 @@ async function main(): Promise<void> {
         console.log(
             JSON.stringify({
                 files_written: result.files.length,
-                categories: result.documents.map((document) => document.categoryId),
                 stats: {
                     candidates: result.documents[0]?.candidateCount ?? 0,
                     included: uniquePapers.size,

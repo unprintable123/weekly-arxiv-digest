@@ -5,6 +5,7 @@ import {
     classifyPapers,
     CLASSIFICATION_BATCH_SIZE,
     CLASSIFICATION_PROMPT_VERSION,
+    isContentSafetyError,
     LLM_CLIENT_VERSION,
     normalizeBatchClassification,
     normalizeClassification,
@@ -160,6 +161,23 @@ describe('normalizeClassification', () => {
                 tldr: 'x',
             }),
         ).toThrow(/unrecognized key/i);
+    });
+});
+
+describe('isContentSafetyError', () => {
+    it('detects provider content-safety HTTP 400 refusals', () => {
+        const error = new Error(
+            'Chat completion failed: HTTP 400: {"error":{"message":"OpenAIException - 系统检测到输入或生成内容可能包含不安全或敏感内容，请您避免输入易产生敏感内容的提示语，感谢您的配合。Error happened to model=GLM-5.3-Flash","type":null,"param":null,"code":"400"}}',
+        );
+        expect(isContentSafetyError(error)).toBe(true);
+    });
+
+    it('does not match other HTTP failures or non-error values', () => {
+        expect(isContentSafetyError(new Error('Chat completion failed: HTTP 400: {"error":"bad request"}'))).toBe(false);
+        expect(isContentSafetyError(new Error('Chat completion failed: HTTP 429: rate limited'))).toBe(false);
+        expect(isContentSafetyError(new Error('chat completion timeout'))).toBe(false);
+        expect(isContentSafetyError('not an error')).toBe(false);
+        expect(isContentSafetyError(undefined)).toBe(false);
     });
 });
 

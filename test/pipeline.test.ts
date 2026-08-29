@@ -412,6 +412,62 @@ describe('runDigest', () => {
         }
     });
 
+    it('falls back to "other" with an empty tldr when a single paper hits a provider content-safety refusal', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            const invoker = {
+                complete: vi.fn(async (prompt: string) => {
+                    const wantsAttention = prompt.includes('Attention Is All You Need');
+                    const wantsMoe = prompt.includes('Mixture of Experts');
+                    // The batch prompt (both papers) and the MoE single-paper
+                    // call keep returning the provider content-safety refusal.
+                    if (wantsAttention && !wantsMoe) {
+                        return JSON.stringify([{ id: '2401.01234', categories: ['test-architecture'], tags: ['attention'], tldr: '提出可扩展的注意力机制。' }]);
+                    }
+                    throw new Error(
+                        'Chat completion failed: HTTP 400: {"error":{"message":"OpenAIException - 系统检测到输入或生成内容可能包含不安全或敏感内容，请您避免输入易产生敏感内容的提示语。","type":null,"param":null,"code":"400"}}',
+                    );
+                }),
+            };
+            stubCrawl();
+
+            const result = await runDigest(cfg, window(), { root, invoker });
+            // The content-safety refusal is a graceful fallback, not an error.
+            expect(result.errors).toBe(0);
+            expect(result.status).toBe('ok');
+            // Attention is classified normally; MoE lands under "other" with an
+            // empty tldr instead of being dropped from the digest. Documents are
+            // ordered by category id, so "other" sorts before "test-architecture".
+            expect(result.documents.map((document) => document.categoryId)).toEqual([
+                'other',
+                'test-architecture',
+            ]);
+            const moe = result.documents.find((document) => document.categoryId === 'other')!;
+            expect(moe.papers.map((paper) => paper.arxivId)).toEqual(['2401.01235']);
+            expect(moe.papers[0].classification).toEqual({ categories: ['other'], tags: [], tldr: '' });
+
+            // Markdown: the fallback paper renders without a TLDR line.
+            const otherMd = contentFor(result, 'other');
+            expect(otherMd).toContain('2401.01235');
+            expect(otherMd).not.toContain('- **TLDR:**');
+            const architectureMd = contentFor(result, 'test-architecture');
+            expect(architectureMd).toContain('- **TLDR:** 提出可扩展的注意力机制。');
+
+            // The fallback is not cached (empty tldr stays a cache miss), so a
+            // later run retries the paper and can still recover.
+            const { Store } = await import('../src/db.js');
+            const store = new Store(join(root, '.cache/weekly-digest.sqlite'));
+            try {
+                expect(store.stats().classifications).toBe(1);
+            } finally {
+                store.close();
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it('re-classifies failed papers on a re-run instead of recording errors', async () => {
         const root = makeRoot();
         try {
