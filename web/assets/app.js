@@ -7,7 +7,7 @@
 /** @typedef {{ version: 1, updatedAt: string, weeks: Array<{week: string, from: string, to: string}> }} SiteIndex */
 /** @typedef {{ id: string, name: string, count: number, groupId?: string, groupName?: string }} WeekCategory */
 /** @typedef {{ version: 1, week: string, from: string, to: string, categories: Array<WeekCategory> }} WeekIndex */
-/** @typedef {{ version: 1, week: string, from: string, to: string, categoryId: string, categoryName: string, groupId?: string, groupName?: string, generatedAt: string, configHash: string, candidateCount: number, papers: Array<object> }} WebDocument */
+/** @typedef {{ version: 1, week: string, from: string, to: string, categoryId: string, categoryName: string, groupId?: string, groupName?: string, configHash: string, candidateCount: number, papers: Array<object> }} WebDocument */
 
 const state = {
     /** @type {SiteIndex | undefined} */
@@ -272,7 +272,7 @@ function renderMeta() {
         return;
     }
     el.metaLine.textContent = `Window: ${webDocument.from} to ${webDocument.to} (UTC) · Candidates: ${webDocument.candidateCount} · Papers: ${state.document.papers?.length ?? 0}`;
-    el.footerMeta.textContent = `generated ${webDocument.generatedAt} · config ${String(webDocument.configHash).slice(0, 12)} · doc v${webDocument.version}`;
+    el.footerMeta.textContent = `config ${String(webDocument.configHash).slice(0, 12)} · doc v${webDocument.version}`;
     el.countBadge.textContent = `${state.document.papers?.length ?? 0} papers`;
     el.countBadge.classList.remove('hidden');
     // Document title keeps the Chinese category name (from the week index)

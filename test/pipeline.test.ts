@@ -599,7 +599,7 @@ describe('web output', () => {
         }
     });
 
-    it('keeps json twins byte-identical on cached replay (same generatedAt)', async () => {
+    it('keeps json twins byte-identical on cached replay', async () => {
         const root = makeRoot();
         try {
             const cfg = await loadRootConfig(root);

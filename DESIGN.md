@@ -176,7 +176,7 @@ pnpm site:deploy   # site:build 后把 dist/site 发布到 gh-pages 分支
 
 ## 9. 静态站点输出（gh-pages）
 
-Markdown 之外，每次 `run` 为每个 category document 在 **独立的 JSON feed 目录**（`output.json_directory`，默认 `digests-json`）下写一个同名 `.json` 文档（`weekly-{week}-{category}.json`），内容由 `JsonRenderer` 用稳定键序 JSON 序列化（`stableJson`，键排序 + 尾部换行），因此与 Markdown 一样满足"重复运行字节一致"。JSON 保留文档头字段（week/from/to/categoryId/categoryName/generatedAt/configHash/candidateCount，及可选 groupId/groupName taxonomy 分组信息）与每篇论文的展示字段（arxivId/title/authors/abstractEn/publishedAt/categories/classification，其中 classification 含 categories/tags/tldr），不输出 `contentHash`、`detailUrl` 等内部字段；新文档的 classification 带 `tldr`，旧文档缺该字段时前端自动降级不展示；papers.cool 链接不落盘，由前端按 arXiv ID 以固定模板构造。两级 manifest 也写入 `output.json_directory`：
+Markdown 之外，每次 `run` 为每个 category document 在 **独立的 JSON feed 目录**（`output.json_directory`，默认 `digests-json`）下写一个同名 `.json` 文档（`weekly-{week}-{category}.json`），内容由 `JsonRenderer` 用稳定键序 JSON 序列化（`stableJson`，键排序 + 尾部换行），因此与 Markdown 一样满足"重复运行字节一致"。JSON 保留文档头字段（week/from/to/categoryId/categoryName/configHash/candidateCount，及可选 groupId/groupName taxonomy 分组信息）与每篇论文的展示字段（arxivId/title/authors/abstractEn/publishedAt/categories/classification，其中 classification 含 categories/tags/tldr），不输出 `contentHash`、`detailUrl` 等内部字段；新文档的 classification 带 `tldr`，旧文档缺该字段时前端自动降级不展示；papers.cool 链接不落盘，由前端按 arXiv ID 以固定模板构造。两级 manifest 也写入 `output.json_directory`：
 
 - `digests-json/<week>/index.json`：该周 categories（id/name/count，按 id 排序；含可选 groupId/groupName），驱动 group/category 两级选择器与数量徽章；
 - `digests-json/index.json`：所有含有效周 index 的周（week/from/to，按周倒序），驱动周选择器。

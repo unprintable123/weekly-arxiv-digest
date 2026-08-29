@@ -36,7 +36,6 @@ export type WebDigestDocument = {
     /** Optional taxonomy group metadata (absent in legacy documents). */
     groupId?: string;
     groupName?: string;
-    generatedAt: string;
     configHash: string;
     candidateCount: number;
     papers: WebPaper[];
@@ -94,7 +93,6 @@ const webDocumentSchema = z
         categoryName: z.string().min(1),
         groupId: z.string().min(1).optional(),
         groupName: z.string().min(1).optional(),
-        generatedAt: z.string(),
         configHash: z.string(),
         candidateCount: z.number().int().nonnegative(),
         papers: z.array(webPaperSchema),
@@ -169,7 +167,6 @@ export function toWebDocument(document: {
         categoryName: document.categoryName,
         ...(document.groupId ? { groupId: document.groupId } : {}),
         ...(document.groupName ? { groupName: document.groupName } : {}),
-        generatedAt: document.generatedAt,
         configHash: document.configHash,
         candidateCount: document.candidateCount,
         papers: document.papers.map((paper) => ({

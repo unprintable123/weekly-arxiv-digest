@@ -91,7 +91,6 @@ describe('toWebDocument / parseWebDocument', () => {
             'categoryName',
             'configHash',
             'from',
-            'generatedAt',
             'papers',
             'to',
             'version',
