@@ -193,7 +193,8 @@ Markdown 之外，每次 `run` 为每个 category document 在 **独立的 JSON 
 - 选择器为 Week + Group + Category 三级：先选 group 再选 category；下拉 option 显示英文 topic id，中文名称放在 option `title`（hover 提示）和选中项旁的小字提示中；旧数据（无 groupId）全部归入 `ungrouped` 兜底组；
 - 链接白名单与 Markdown 渲染器一致：仅 `https://arxiv.org/`（含 export 镜像归一化）与 `https://papers.cool/`，其余一律降级为纯文本；papers.cool 链接由 arXiv ID 前端构造；
 - URL 状态用 query 参数（`?week=YYYY-Www&category=<id>`）：选择变化 `pushState`，前进/后退由 `popstate` 恢复；首次加载无参数时取最新周与首个类别并 `replaceState` 规范化；group 由 category 通过周 index 反推，不占 URL 参数；不使用 path 路由（Pages 静态托管无 rewrite）；
-- 卡片字段与 Markdown 一致：标题、tag chips、TLDR（一句话中文，缺失时隐藏）、Category/Authors/arXiv/papers.cool/Published、摘要（默认 4 行截断，可展开）；附客户端过滤框（标题/作者/摘要/TLDR substring，不参与 URL）与暗色模式（localStorage + `prefers-color-scheme`）。
+- 卡片字段与 Markdown 一致：标题、tag chips、TLDR（一句话中文，缺失时隐藏）、Category/Authors/arXiv/papers.cool/Published、摘要（默认 4 行截断，可展开）；附客户端过滤框（标题/作者/摘要/TLDR substring，不参与 URL）与暗色模式（localStorage + `prefers-color-scheme`）；
+- meta 行右侧固定放置一周翻页按钮（上一周=更早、下一周=更新，方向取自按周倒序的站点 manifest）：按钮始终渲染，边界周只禁用对应按钮而不移除占位，保证切换周时按钮位置与 meta 行宽度不变。
 
 ### 9.2 GitHub Pages 部署（gh-pages 分支）
 

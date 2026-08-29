@@ -76,7 +76,45 @@
     </header>
 
     <main class="mx-auto max-w-7xl px-4 py-6">
-      <div id="meta-line" class="mb-5 text-xs text-slate-500 dark:text-slate-400"></div>
+      <div
+        class="mb-5 flex items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400"
+      >
+        <div id="meta-line" class="min-w-0 flex-1 truncate"></div>
+        <div class="flex shrink-0 gap-1.5">
+          <button
+            id="week-prev"
+            type="button"
+            title="Previous week"
+            aria-label="Previous week"
+            disabled
+            class="rounded-lg border p-1.5 shadow-sm disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-slate-100 dark:enabled:hover:bg-slate-800"
+          >
+            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M12.78 4.22a.75.75 0 0 1 0 1.06L8.06 10l4.72 4.72a.75.75 0 1 1-1.06 1.06L6.44 10.53a.75.75 0 0 1 0-1.06l5.28-5.25a.75.75 0 0 1 1.06 0Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+          <button
+            id="week-next"
+            type="button"
+            title="Next week"
+            aria-label="Next week"
+            disabled
+            class="rounded-lg border p-1.5 shadow-sm disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-slate-100 dark:enabled:hover:bg-slate-800"
+          >
+            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path
+                fill-rule="evenodd"
+                d="M7.24 4.22a.75.75 0 0 0 0 1.06L11.96 10l-4.72 4.72a.75.75 0 1 0 1.06 1.06l5.28-5.25a.75.75 0 0 0 0-1.06L8.38 4.22a.75.75 0 0 0-1.14 0Z"
+                clip-rule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      </div>
 
       <div id="paper-list" class="grid grid-cols-1 gap-4 lg:grid-cols-2"></div>
 

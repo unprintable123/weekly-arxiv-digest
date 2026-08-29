@@ -40,6 +40,8 @@ const el = {
     iconSun: document.getElementById('icon-sun'),
     iconMoon: document.getElementById('icon-moon'),
     metaLine: document.getElementById('meta-line'),
+    weekPrev: document.getElementById('week-prev'),
+    weekNext: document.getElementById('week-next'),
     paperList: document.getElementById('paper-list'),
     stateEmpty: document.getElementById('state-empty'),
     stateError: document.getElementById('state-error'),
@@ -470,18 +472,58 @@ applyTheme(savedTheme ? savedTheme === 'dark' : window.matchMedia('(prefers-colo
 
 // Events ---------------------------------------------------------------------
 
-el.weekSelect.addEventListener('change', () => {
-    state.week = el.weekSelect.value;
+/** Shared week-switch flow for the week select and the prev/next buttons. */
+async function switchWeek(week) {
+    state.week = week;
+    el.weekSelect.value = week;
     syncUrl('pushState');
-    loadWeekCategories()
-        .then(() => {
-            syncUrl('replaceState');
-            return refresh();
-        })
-        .catch((error) => {
-            resetPanels();
-            showError(error instanceof Error ? error.message : String(error));
-        });
+    try {
+        await loadWeekCategories();
+        syncUrl('replaceState');
+        updateWeekNav();
+        await refresh();
+    } catch (error) {
+        resetPanels();
+        showError(error instanceof Error ? error.message : String(error));
+    }
+}
+
+el.weekSelect.addEventListener('change', () => {
+    switchWeek(el.weekSelect.value);
+});
+
+// Week pagination -------------------------------------------------------------
+
+/**
+ * Adjacent entry in the manifest (sorted newest first): delta -1 = newer
+ * week, +1 = older week. Undefined when there is no published neighbor.
+ * @param {number} delta
+ */
+function adjacentWeek(delta) {
+    const weeks = state.siteIndex?.weeks ?? [];
+    const index = weeks.findIndex((entry) => entry.week === state.week);
+    if (index === -1) return undefined;
+    return weeks[index + delta];
+}
+
+/**
+ * Enable prev/next only for indexes that exist in the manifest. Both buttons
+ * always stay rendered (disabled instead of hidden) so the meta line keeps a
+ * fixed width and the controls never shift positions between weeks.
+ */
+function updateWeekNav() {
+    el.weekPrev.disabled = !adjacentWeek(1);
+    el.weekNext.disabled = !adjacentWeek(-1);
+}
+
+el.weekPrev.addEventListener('click', () => {
+    const older = adjacentWeek(1);
+    if (older) switchWeek(older.week);
+});
+
+el.weekNext.addEventListener('click', () => {
+    const newer = adjacentWeek(-1);
+    if (newer) switchWeek(newer.week);
 });
 
 el.groupSelect.addEventListener('change', () => {
@@ -515,6 +557,7 @@ window.addEventListener('popstate', () => {
     state.week = next.week;
     state.category = next.category;
     el.weekSelect.value = state.week ?? '';
+    updateWeekNav();
     loadWeekCategories()
         .then(() => refresh())
         .catch((error) => {
@@ -545,6 +588,7 @@ window.addEventListener('popstate', () => {
         (state.siteIndex.weeks ?? []).map((entry) => ({ value: entry.week, label: entry.week })),
         state.week,
     );
+    updateWeekNav();
     if (!state.week) {
         resetPanels();
         showEmpty('No weeks have been published yet.');
