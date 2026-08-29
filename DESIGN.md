@@ -12,8 +12,8 @@
 
 ## 2. 技术栈与模块边界
 
-- Node.js `>=22.19.0`、pnpm `9.15.0`、严格 TypeScript、ESM、`tsx` 和 `tsc`。
-- `yaml` + `zod` 负责配置和 agent JSON 校验，`cheerio` 负责 HTML/Atom 解析，`p-limit` 控制并发，`sql.js` 提供单文件 SQLite 缓存。
+- Node.js `>=24.0.0`、pnpm `9.15.0`、严格 TypeScript、ESM、`tsx` 和 `tsc`。
+- `yaml` + `zod` 负责配置和 agent JSON 校验，`cheerio` 负责 HTML/Atom 解析，`p-limit` 控制并发，Node 内置 `node:sqlite`（`DatabaseSync`）提供单文件 SQLite 缓存，不引入任何 SQLite 依赖。
 - LLM 分类通过内置的 OpenAI 兼容 chat completion 客户端（`src/llm.ts`，仅用 Node 内置 `fetch`）完成；端点与密钥来自环境变量 `BASE_URL` / `API_KEY`（`.env` 由 CLI 自动加载）。禁止全局 `pi`、`npx`、运行时下载依赖或子进程启动 agent。
 
 源码职责：
@@ -113,7 +113,7 @@ SQLite 文件默认位于 `.cache/weekly-digest.sqlite`，它只是一个可复�
 - `classification_cache`：缓存 key（主键）、arXiv ID、内容 hash、model、category JSON、tag JSON、tldr JSON、状态和时间。prompt 版本、client 版本、endpoint 和原始响应不落库：前三者参与缓存 key 的计算（prompt/client/model/endpoint 任一变化产生新 key；taxonomy 不参与 key，编辑 TOPICS.yaml 不失效缓存），原始 LLM 响应不保存，只保留归一化后的 category/tag/tldr。精确 key 未命中时按 arXiv ID + 内容 hash 回退复用最新条目；`tldr_json` 缺失或为空的旧行视为未命中（prompt 版本升级后自动重新分类）。
 - `meta`：极小的 key/value 表，目前仅保存 `(week, config hash) -> generated_at`，用于让全缓存重复运行的输出字节一致。
 
-写入 IO：sql.js 数据库完全驻留内存，写语句不触发磁盘 IO。刷盘（导出内存快照到临时文件再原子 rename）按以下节奏执行：抓取阶段结束一次；分类阶段每积累 100 条新增分类结果一次，阶段结束时再补齐不足 100 条的尾部；meta 更新后；`close()`。纯缓存命中的读取路径不产生任何写入和刷盘。进程崩溃最多丢失最近未刷盘的新增缓存，且由于快照是原子替换，磁盘上的旧库文件永远不会损坏。不做旧版本数据库自动迁移：库文件结构仅由当前代码的 SCHEMA 决定，删除旧库文件即重新开始缓存。新增 `tldr_json` 列后旧库文件不再兼容，需删除 `.cache/weekly-digest.sqlite` 重建。`cache prune` 在一个事务中完成删除。默认不自动清理缓存。
+写入 IO：SQLite 库由 Node 内置 `node:sqlite`（`DatabaseSync`）直接打开磁盘文件，WAL 模式下每条已提交语句增量、持久地写入磁盘（WAL 文件追加，不重写主库文件），持久化不再按阶段快照。`flush()` 的唯一职责是 `PRAGMA wal_checkpoint(PASSIVE)`（把已提交的 WAL 合并回主库、限制 WAL 体积），在以下节奏调用：抓取阶段结束一次；分类阶段每积累 100 条新增分类结果一次，阶段结束时再补齐不足 100 条的尾部；meta 更新后；`close()`（SQLite 关闭时自动完成最终 checkpoint）。纯缓存命中的读取路径不产生任何写入。进程崩溃不丢失任何已提交事务，也不会损坏磁盘上的库文件。不做旧版本数据库自动迁移：库文件结构仅由当前代码的 SCHEMA 决定，删除旧库文件即重新开始缓存。sql.js 时代的库文件本身就是标准 SQLite 格式，`node:sqlite` 打开时无需迁移；仅新增 `tldr_json` 列之前的旧库不兼容，需删除 `.cache/weekly-digest.sqlite` 重建。`cache prune` 在一个事务中完成删除。默认不自动清理缓存。
 
 分类缓存可通过 `digest cache clear-classifications [--older-than DAYS]` 显式清除：不带参数删除全部分类缓存，带参数只删除早于 N 天的条目，返回删除行数。这是 taxonomy 或提示词变更后触发重分类的唯一途径。
 

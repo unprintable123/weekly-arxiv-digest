@@ -4,9 +4,9 @@
 
 `weekly-arxiv-digest-agent` is a private Node.js CLI that builds weekly arXiv paper digests.
 
-- Runtime: Node.js `>=22.19.0`, ECMAScript modules, pnpm `9.15.0`.
+- Runtime: Node.js `>=24.0.0`, ECMAScript modules, pnpm `9.15.0`.
 - Language and build: strict TypeScript, `tsx` for local execution, `tsc` for the build.
-- Runtime libraries: `zod` for validation, `yaml` for configuration, `cheerio` for HTML/Atom parsing, `p-limit` for bounded concurrency, `sql.js` for the SQLite/WASM store, and the built-in OpenAI-compatible chat completion client (`src/llm.ts`) for the LLM.
+- Runtime libraries: `zod` for validation, `yaml` for configuration, `cheerio` for HTML/Atom parsing, `p-limit` for bounded concurrency, the built-in `node:sqlite` module (`DatabaseSync`, incremental WAL persistence) for the SQLite store, and the built-in OpenAI-compatible chat completion client (`src/llm.ts`) for the LLM.
 - Test and quality tools: Vitest and ESLint with the `typescript-eslint` recommended rules.
 - Sources: `papers.cool` HTML or the arXiv Export API, selected by `source.provider` in `config.yaml`.
 - Storage: `.cache/weekly-digest.sqlite`; generated Markdown is written to `digests/` by default.

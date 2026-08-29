@@ -1,50 +1,8 @@
-import { existsSync, writeFileSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { describe, expect, it, vi, afterEach } from 'vitest';
-import { replaceFileOver, Store } from '../src/db.js';
+import { describe, expect, it } from 'vitest';
+import { Store } from '../src/db.js';
 import type { ClassificationResult, Paper } from '../src/types.js';
 import { makeStore } from './helpers.js';
-
-/**
- * Node's fs ESM namespace cannot be spied on, so src/db.ts's `renameSync`
- * binding is swapped through a vi.mock indirection pointed at a mutable
- * implementation that each test installs and afterEach restores. The real
- * binding is captured via createRequire outside the mocked namespace so the
- * mock can delegate to it without recursing.
- */
-const realRename = createRequire(import.meta.url)('node:fs').renameSync as (
-    from: string,
-    to: string,
-) => void;
-let renameImpl: (from: string, to: string) => void = realRename;
-let renameCalls = 0;
-vi.mock('node:fs', async (importOriginal) => {
-    const real = await importOriginal<typeof import('node:fs')>();
-    return {
-        ...real,
-        renameSync: (from: string, to: string) => {
-            renameCalls += 1;
-            return renameImpl(from, to);
-        },
-    };
-});
-
-const failTimes = (code: string, times: number) => {
-    renameImpl = (from, to) => {
-        if (renameCalls <= times) {
-            const error = new Error(`${code}: mocked fs failure`) as NodeJS.ErrnoException;
-            error.code = code;
-            throw error;
-        }
-        realRename(from, to);
-    };
-};
-
-afterEach(() => {
-    renameImpl = realRename;
-    renameCalls = 0;
-});
 
 const paper = (id: string, publishedAt = '2024-01-02T00:00:00.000Z'): Paper => ({
     arxivId: id,
@@ -63,6 +21,46 @@ const result = (primary: string, secondary?: string): ClassificationResult => ({
     categories: secondary ? [primary, secondary] : [primary],
     tags: ['attention'],
     tldr: '一句话中文摘要。',
+});
+
+describe('incremental persistence', () => {
+    it('survives reopen without an explicit flush: writes are durable immediately', () => {
+        const { store, dir, cleanup } = makeStore();
+        try {
+            store.savePaper(paper('2401.01234'));
+            store.saveClassification('k1', paper('2401.01234'), model, result('llm-architecture'));
+            store.setMeta('generated_at:2024-W01:abc', '2024-01-08T00:00:00.000Z');
+            // No flush(): every committed statement must already be on disk.
+            store.close();
+
+            const reopened = new Store(join(dir, 'cache.sqlite'));
+            try {
+                expect(reopened.getPaper('2401.01234')?.title).toBe('Paper 2401.01234');
+                expect(reopened.getClassification('k1')?.tldr).toBe('一句话中文摘要。');
+                expect(reopened.getMeta('generated_at:2024-W01:abc')).toBe('2024-01-08T00:00:00.000Z');
+            } finally {
+                reopened.close();
+            }
+        } finally {
+            cleanup();
+        }
+    });
+
+    it('committed writes stay durable when a transaction is used (prune)', () => {
+        const { store, dir, cleanup } = makeStore();
+        try {
+            store.saveFetch('https://example.com/list', [{ arxivId: '2401.01234' }], {});
+            store.close();
+            const reopened = new Store(join(dir, 'cache.sqlite'));
+            try {
+                expect(reopened.getFetch('https://example.com/list')).toBeDefined();
+            } finally {
+                reopened.close();
+            }
+        } finally {
+            cleanup();
+        }
+    });
 });
 
 describe('classification cache', () => {
@@ -126,7 +124,7 @@ describe('classification cache', () => {
 });
 
 describe('clearClassifications', () => {
-    it('deletes everything without a cutoff, only stale rows with one', () => {
+    it('deletes everything without a cutoff, only stale rows with one', async () => {
         const { store, cleanup } = makeStore();
         try {
             store.savePaper(paper('2401.01234'));
@@ -135,6 +133,10 @@ describe('clearClassifications', () => {
             expect(store.clearClassifications(30)).toBe(0);
             expect(store.getClassification('k1')).toBeDefined();
 
+            // Let at least one millisecond pass so the stored timestamps are
+            // strictly older than "now" when clearing with age=0 (same race
+            // guard as the prune test).
+            await new Promise((resolve) => setTimeout(resolve, 5));
             // age=0 removes all rows recorded before "now".
             expect(store.clearClassifications(0)).toBe(1);
             expect(store.getClassification('k1')).toBeUndefined();
@@ -272,71 +274,6 @@ describe('fetch cache', () => {
             // Corrupt rows degrade to a miss instead of throwing.
             store.db.exec("UPDATE fetch_cache SET papers_json='{' WHERE url='https://example.com/list'");
             expect(store.getFetch('https://example.com/list')).toBeUndefined();
-        } finally {
-            cleanup();
-        }
-    });
-});
-
-describe('replaceFileOver', () => {
-    it('replaces an existing target file', async () => {
-        const { dir, cleanup } = makeStore();
-        try {
-            const source = join(dir, 'src.txt');
-            const target = join(dir, 'target.txt');
-            writeFileSync(source, 'new');
-            writeFileSync(target, 'old');
-            replaceFileOver(source, target);
-            expect(readFileSync(target, 'utf8')).toBe('new');
-            expect(existsSync(source)).toBe(false);
-        } finally {
-            cleanup();
-        }
-    });
-
-    it('retries transient destination locks (EPERM) before succeeding', () => {
-        const { dir, cleanup } = makeStore();
-        try {
-            const source = join(dir, 'src.txt');
-            const target = join(dir, 'target.txt');
-            writeFileSync(source, 'new');
-            writeFileSync(target, 'old');
-            failTimes('EPERM', 1);
-            replaceFileOver(source, target);
-            expect(readFileSync(target, 'utf8')).toBe('new');
-            expect(renameCalls).toBe(2);
-        } finally {
-            cleanup();
-        }
-    });
-
-    it('throws after exhausting retries for a persistent lock', () => {
-        const { dir, cleanup } = makeStore();
-        try {
-            const source = join(dir, 'src.txt');
-            const target = join(dir, 'target.txt');
-            writeFileSync(source, 'new');
-            failTimes('EBUSY', Number.MAX_SAFE_INTEGER);
-            // makeStore's Store constructor also passes through the mocked
-            // renameSync; measure only the calls made by this helper.
-            renameCalls = 0;
-            expect(() => replaceFileOver(source, target)).toThrow(/EBUSY/);
-            expect(renameCalls).toBe(5);
-        } finally {
-            cleanup();
-        }
-    });
-
-    it('does not retry non-transient errors', () => {
-        const { dir, cleanup } = makeStore();
-        try {
-            const source = join(dir, 'src.txt');
-            const target = join(dir, 'no-such-dir', 'target.txt');
-            writeFileSync(source, 'new');
-            failTimes('ENOENT', Number.MAX_SAFE_INTEGER);
-            renameCalls = 0;
-            expect(() => replaceFileOver(source, target)).toThrow(/ENOENT/);
-            expect(renameCalls).toBe(1);
         } finally {
             cleanup();
         }

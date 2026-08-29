@@ -1,16 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
-import initSqlJs from 'sql.js';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import type { ClassificationResult, Paper } from './types.js';
 import { isoWeekOf } from './window.js';
-
-const require = createRequire(import.meta.url);
-const sqlJs: any = await initSqlJs({
-  locateFile: (file) => join(dirname(require.resolve('sql.js')), file),
-});
-
-type SqliteDatabase = any;
 
 /** Convert a `papers` table row into the domain `Paper` object. */
 export function rowToPaper(row: any): Paper {
@@ -26,126 +18,6 @@ export function rowToPaper(row: any): Paper {
     detailUrl: row.detail_url,
     contentHash: row.content_hash,
   };
-}
-
-/**
- * Atomically replace the target file with the source file. On Windows the
- * destination is commonly locked for milliseconds by antivirus scanners,
- * file-indexing, or sync tools, so a plain rename fails with EPERM; retry a
- * few times with a short backoff before giving up.
- */
-export function replaceFileOver(source: string, target: string): void {
-  const attempts = 5;
-  let delayMs = 50;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      renameSync(source, target);
-      return;
-    } catch (error) {
-      lastError = error;
-      const code = (error as NodeJS.ErrnoException).code;
-      // Retry only transient sharing violations on the destination file.
-      if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error;
-      // Synchronous sleep: this helper must stay usable from sync callers.
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
-      delayMs *= 2;
-    }
-  }
-  throw lastError;
-}
-
-class Statement {
-  constructor(
-    private readonly database: SqliteDatabase,
-    private readonly sql: string,
-    private readonly onWrite?: () => void,
-  ) { }
-
-  private bind(statement: any, params: unknown[]): void {
-    statement.bind(
-      params.length === 1 && params[0] && typeof params[0] === 'object'
-        ? (params[0] as Record<string, unknown>)
-        : params,
-    );
-  }
-
-  get(...params: unknown[]): any {
-    const statement = this.database.prepare(this.sql);
-    this.bind(statement, params);
-    const row = statement.step() ? statement.getAsObject() : undefined;
-    statement.free();
-    return row;
-  }
-
-  all(...params: unknown[]): any[] {
-    const statement = this.database.prepare(this.sql);
-    this.bind(statement, params);
-    const rows: any[] = [];
-    while (statement.step()) rows.push(statement.getAsObject());
-    statement.free();
-    return rows;
-  }
-
-  run(...params: unknown[]): { changes: number } {
-    const statement = this.database.prepare(this.sql);
-    this.bind(statement, params);
-    statement.step();
-    statement.free();
-    this.onWrite?.();
-    return { changes: this.database.getRowsModified() };
-  }
-}
-
-class SqliteStore {
-  constructor(
-    readonly database: SqliteDatabase,
-    private readonly file: string,
-  ) { }
-
-  prepare(sql: string): Statement {
-    return new Statement(this.database, sql);
-  }
-
-  exec(sql: string): void {
-    this.database.exec(sql);
-  }
-
-  pragma(_value: string): void { }
-
-  transaction<T>(callback: () => T): () => T {
-    return () => {
-      this.database.exec('BEGIN');
-      try {
-        return callback();
-      } finally {
-        this.database.exec('COMMIT');
-      }
-    };
-  }
-
-  /** Write a snapshot to a temp file then atomically rename over the target. */
-  persist(): void {
-    const buffer = Buffer.from(this.database.export());
-    const temporary = `${this.file}.tmp-${process.pid}`;
-    try {
-      writeFileSync(temporary, buffer);
-      replaceFileOver(temporary, this.file);
-    } catch (error) {
-      // Never leave orphaned temp snapshots behind.
-      try {
-        unlinkSync(temporary);
-      } catch {
-        /* best effort */
-      }
-      throw error;
-    }
-  }
-
-  close(): void {
-    this.persist();
-    this.database.close();
-  }
 }
 
 const SCHEMA = `
@@ -188,14 +60,15 @@ CREATE TABLE IF NOT EXISTS meta (
 `;
 
 export class Store {
-  db: SqliteStore;
+  db: DatabaseSync;
 
   constructor(file: string) {
     mkdirSync(dirname(file), { recursive: true });
-    const bytes = existsSync(file) ? readFileSync(file) : undefined;
-    const database = new sqlJs.Database(bytes && bytes.length ? bytes : undefined);
-    this.db = new SqliteStore(database, file);
-    this.db.pragma('journal_mode = WAL');
+    // The database file is the persistent store: every committed statement is
+    // already durable (WAL), so `flush()` below only checkpoints the WAL.
+    this.db = new DatabaseSync(file);
+    this.db.exec('PRAGMA journal_mode = WAL');
+    this.db.exec('PRAGMA synchronous = NORMAL');
     this.db.exec(SCHEMA);
   }
 
@@ -203,9 +76,21 @@ export class Store {
     this.db.close();
   }
 
-  /** Persist the in-memory database snapshot to disk (atomic temp+rename). */
+  /**
+   * Merge the write-ahead log back into the main database file. Writes are
+   * already durable when committed; this bounds WAL growth between stages.
+   */
   flush(): void {
-    this.db.persist();
+    this.db.exec('PRAGMA wal_checkpoint(PASSIVE)');
+  }
+
+  private transaction<T>(callback: () => T): T {
+    this.db.exec('BEGIN');
+    try {
+      return callback();
+    } finally {
+      this.db.exec('COMMIT');
+    }
   }
 
   getPaper(id: string): Paper | undefined {
@@ -309,7 +194,7 @@ export class Store {
 
   getClassification(key: string): ClassificationResult | undefined {
     const row = this.db
-      .prepare('SELECT * FROM classification_cache WHERE cache_key=? AND status="ok"')
+      .prepare("SELECT * FROM classification_cache WHERE cache_key=? AND status='ok'")
       .get(key) as any;
     return this.rowClassification(row);
   }
@@ -322,10 +207,10 @@ export class Store {
   latestClassification(id: string, contentHash?: string): ClassificationResult | undefined {
     const row = contentHash === undefined
       ? this.db
-        .prepare('SELECT * FROM classification_cache WHERE arxiv_id=? AND status="ok" ORDER BY created_at DESC LIMIT 1')
+        .prepare("SELECT * FROM classification_cache WHERE arxiv_id=? AND status='ok' ORDER BY created_at DESC LIMIT 1")
         .get(id)
       : this.db
-        .prepare('SELECT * FROM classification_cache WHERE arxiv_id=? AND content_hash=? AND status="ok" ORDER BY created_at DESC LIMIT 1')
+        .prepare("SELECT * FROM classification_cache WHERE arxiv_id=? AND content_hash=? AND status='ok' ORDER BY created_at DESC LIMIT 1")
         .get(id, contentHash);
     return this.rowClassification(row);
   }
@@ -386,7 +271,7 @@ export class Store {
       : this.db
         .prepare('DELETE FROM classification_cache WHERE created_at < ?')
         .run(new Date(Date.now() - olderThanDays * 86400000).toISOString());
-    return rows.changes;
+    return Number(rows.changes);
   }
 
   getMeta(key: string): string | undefined {
@@ -415,12 +300,11 @@ export class Store {
       throw new Error('older-than must be a non-negative number');
     }
     const before = new Date(Date.now() - days * 86400000).toISOString();
-    const transaction = this.db.transaction(() => {
+    return this.transaction(() => {
       let deleted = 0;
-      deleted += this.db.prepare('DELETE FROM fetch_cache WHERE fetched_at < ?').run(before).changes;
-      deleted += this.db.prepare('DELETE FROM classification_cache WHERE created_at < ?').run(before).changes;
+      deleted += Number(this.db.prepare('DELETE FROM fetch_cache WHERE fetched_at < ?').run(before).changes);
+      deleted += Number(this.db.prepare('DELETE FROM classification_cache WHERE created_at < ?').run(before).changes);
       return deleted;
     });
-    return transaction();
   }
 }
