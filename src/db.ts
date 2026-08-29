@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type { ClassificationResult, Paper } from './types.js';
 import { isoWeekOf } from './window.js';
 
@@ -57,10 +57,35 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+-- Composite lookup index: an arxiv_id + status prefix with a created_at DESC
+-- tail so latestClassification returns the newest row without a sort; the
+-- content_hash filter then scans only the few versions of the same paper.
+CREATE INDEX IF NOT EXISTS idx_classification_cache_lookup
+ON classification_cache (arxiv_id, status, created_at DESC, content_hash);
 `;
 
 export class Store {
   db: DatabaseSync;
+
+  // Prepared statements are compiled once at construction and reused for the
+  // store's lifetime; re-parsing SQL on every call was the per-paper overhead.
+  private stmtGetPaper: StatementSync;
+  private stmtSavePaper: StatementSync;
+  private stmtPapersBetween: StatementSync;
+  private stmtAllPapers: StatementSync;
+  private stmtGetFetch: StatementSync;
+  private stmtSaveFetch: StatementSync;
+  private stmtGetClassification: StatementSync;
+  private stmtLatestClassification: StatementSync;
+  private stmtLatestClassificationByContent: StatementSync;
+  private stmtSaveClassification: StatementSync;
+  private stmtDeleteAllClassifications: StatementSync;
+  private stmtDeleteStaleClassifications: StatementSync;
+  private stmtGetMeta: StatementSync;
+  private stmtSetMeta: StatementSync;
+  private stmtStats: StatementSync;
+  private stmtPruneFetches: StatementSync;
+  private stmtPruneClassifications: StatementSync;
 
   constructor(file: string) {
     mkdirSync(dirname(file), { recursive: true });
@@ -70,6 +95,54 @@ export class Store {
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec('PRAGMA synchronous = NORMAL');
     this.db.exec(SCHEMA);
+    this.stmtGetPaper = this.db.prepare('SELECT * FROM papers WHERE arxiv_id=?');
+    this.stmtSavePaper = this.db.prepare(
+      `INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(arxiv_id) DO UPDATE SET
+         version=excluded.version,
+         title=excluded.title,
+         authors_json=excluded.authors_json,
+         categories_json=excluded.categories_json,
+         abstract_en=excluded.abstract_en,
+         published_at=excluded.published_at,
+         updated_at=excluded.updated_at,
+         detail_url=excluded.detail_url,
+         content_hash=excluded.content_hash,
+         fetched_at=excluded.fetched_at`,
+    );
+    this.stmtPapersBetween = this.db.prepare(
+      'SELECT * FROM papers WHERE published_at >= ? AND published_at < ? ORDER BY arxiv_id',
+    );
+    this.stmtAllPapers = this.db.prepare('SELECT published_at FROM papers');
+    this.stmtGetFetch = this.db.prepare('SELECT * FROM fetch_cache WHERE url=?');
+    this.stmtSaveFetch = this.db.prepare('INSERT OR REPLACE INTO fetch_cache VALUES (?,?,?,?,?,?)');
+    this.stmtGetClassification = this.db.prepare(
+      "SELECT * FROM classification_cache WHERE cache_key=? AND status='ok'",
+    );
+    this.stmtLatestClassification = this.db.prepare(
+      "SELECT * FROM classification_cache WHERE arxiv_id=? AND status='ok' ORDER BY created_at DESC LIMIT 1",
+    );
+    this.stmtLatestClassificationByContent = this.db.prepare(
+      "SELECT * FROM classification_cache WHERE arxiv_id=? AND content_hash=? AND status='ok' ORDER BY created_at DESC LIMIT 1",
+    );
+    this.stmtSaveClassification = this.db.prepare(
+      'INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?,?)',
+    );
+    this.stmtDeleteAllClassifications = this.db.prepare('DELETE FROM classification_cache');
+    this.stmtDeleteStaleClassifications = this.db.prepare(
+      'DELETE FROM classification_cache WHERE created_at < ?',
+    );
+    this.stmtGetMeta = this.db.prepare('SELECT value FROM meta WHERE key=?');
+    this.stmtSetMeta = this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)');
+    this.stmtStats = this.db.prepare(
+      'SELECT (SELECT count(*) FROM papers) papers, ' +
+      '(SELECT count(*) FROM fetch_cache) fetches, ' +
+      '(SELECT count(*) FROM classification_cache) classifications',
+    );
+    this.stmtPruneFetches = this.db.prepare('DELETE FROM fetch_cache WHERE fetched_at < ?');
+    this.stmtPruneClassifications = this.db.prepare(
+      'DELETE FROM classification_cache WHERE created_at < ?',
+    );
   }
 
   close(): void {
@@ -94,53 +167,34 @@ export class Store {
   }
 
   getPaper(id: string): Paper | undefined {
-    const row = this.db.prepare('SELECT * FROM papers WHERE arxiv_id=?').get(id) as any;
+    const row = this.stmtGetPaper.get(id) as any;
     return row && this.rowPaper(row);
   }
 
   savePaper(p: Paper): void {
-    this.db
-      .prepare(
-        `INSERT INTO papers VALUES (?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(arxiv_id) DO UPDATE SET
-           version=excluded.version,
-           title=excluded.title,
-           authors_json=excluded.authors_json,
-           categories_json=excluded.categories_json,
-           abstract_en=excluded.abstract_en,
-           published_at=excluded.published_at,
-           updated_at=excluded.updated_at,
-           detail_url=excluded.detail_url,
-           content_hash=excluded.content_hash,
-           fetched_at=excluded.fetched_at`,
-      )
-      .run(
-        p.arxivId,
-        p.version ?? '',
-        p.title,
-        JSON.stringify(p.authors),
-        JSON.stringify(p.categories),
-        p.abstractEn,
-        p.publishedAt,
-        p.updatedAt ?? '',
-        p.detailUrl,
-        p.contentHash,
-        new Date().toISOString(),
-      );
+    this.stmtSavePaper.run(
+      p.arxivId,
+      p.version ?? '',
+      p.title,
+      JSON.stringify(p.authors),
+      JSON.stringify(p.categories),
+      p.abstractEn,
+      p.publishedAt,
+      p.updatedAt ?? '',
+      p.detailUrl,
+      p.contentHash,
+      new Date().toISOString(),
+    );
   }
 
   /** All stored papers published inside the half-open [from, to) window. */
   papersBetween(from: string, to: string): Paper[] {
-    return (this.db
-      .prepare('SELECT * FROM papers WHERE published_at >= ? AND published_at < ? ORDER BY arxiv_id')
-      .all(from, to) as any[]).map((row) => this.rowPaper(row));
+    return (this.stmtPapersBetween.all(from, to) as any[]).map((row) => this.rowPaper(row));
   }
 
   /** Sorted ISO week ids (`YYYY-Www`) that have at least one cached paper. */
   distinctWeeks(): string[] {
-    const rows = this.db
-      .prepare('SELECT published_at FROM papers')
-      .all() as Array<{ published_at: string }>;
+    const rows = this.stmtAllPapers.all() as Array<{ published_at: string }>;
     const weeks = new Set<string>();
     for (const row of rows) {
       const week = isoWeekOf(row.published_at);
@@ -160,7 +214,7 @@ export class Store {
     lastModified: string;
     expiresAt: string;
   } | undefined {
-    const row = this.db.prepare('SELECT * FROM fetch_cache WHERE url=?').get(url) as any;
+    const row = this.stmtGetFetch.get(url) as any;
     if (!row || typeof row.papers_json !== 'string' || !row.papers_json) return undefined;
     try {
       return {
@@ -180,22 +234,18 @@ export class Store {
     lastModified?: string;
     expiresAt?: string;
   }): void {
-    this.db
-      .prepare('INSERT OR REPLACE INTO fetch_cache VALUES (?,?,?,?,?,?)')
-      .run(
-        url,
-        JSON.stringify(papers),
-        meta.etag || '',
-        meta.lastModified || '',
-        meta.expiresAt || '',
-        new Date().toISOString(),
-      );
+    this.stmtSaveFetch.run(
+      url,
+      JSON.stringify(papers),
+      meta.etag || '',
+      meta.lastModified || '',
+      meta.expiresAt || '',
+      new Date().toISOString(),
+    );
   }
 
   getClassification(key: string): ClassificationResult | undefined {
-    const row = this.db
-      .prepare("SELECT * FROM classification_cache WHERE cache_key=? AND status='ok'")
-      .get(key) as any;
+    const row = this.stmtGetClassification.get(key) as any;
     return this.rowClassification(row);
   }
 
@@ -206,13 +256,9 @@ export class Store {
    */
   latestClassification(id: string, contentHash?: string): ClassificationResult | undefined {
     const row = contentHash === undefined
-      ? this.db
-        .prepare("SELECT * FROM classification_cache WHERE arxiv_id=? AND status='ok' ORDER BY created_at DESC LIMIT 1")
-        .get(id)
-      : this.db
-        .prepare("SELECT * FROM classification_cache WHERE arxiv_id=? AND content_hash=? AND status='ok' ORDER BY created_at DESC LIMIT 1")
-        .get(id, contentHash);
-    return this.rowClassification(row);
+      ? this.stmtLatestClassification.get(id)
+      : this.stmtLatestClassificationByContent.get(id, contentHash);
+    return this.rowClassification(row as any);
   }
 
   /**
@@ -242,19 +288,17 @@ export class Store {
     model: string,
     r: ClassificationResult,
   ): void {
-    this.db
-      .prepare('INSERT OR REPLACE INTO classification_cache VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(
-        key,
-        p.arxivId,
-        p.contentHash,
-        model,
-        JSON.stringify(r.categories),
-        JSON.stringify(r.tags),
-        JSON.stringify(r.tldr),
-        'ok',
-        new Date().toISOString(),
-      );
+    this.stmtSaveClassification.run(
+      key,
+      p.arxivId,
+      p.contentHash,
+      model,
+      JSON.stringify(r.categories),
+      JSON.stringify(r.tags),
+      JSON.stringify(r.tldr),
+      'ok',
+      new Date().toISOString(),
+    );
   }
 
   /**
@@ -267,32 +311,24 @@ export class Store {
       throw new Error('older-than must be a non-negative number');
     }
     const rows = olderThanDays === undefined
-      ? this.db.prepare('DELETE FROM classification_cache').run()
-      : this.db
-        .prepare('DELETE FROM classification_cache WHERE created_at < ?')
-        .run(new Date(Date.now() - olderThanDays * 86400000).toISOString());
+      ? this.stmtDeleteAllClassifications.run()
+      : this.stmtDeleteStaleClassifications.run(
+        new Date(Date.now() - olderThanDays * 86400000).toISOString(),
+      );
     return Number(rows.changes);
   }
 
   getMeta(key: string): string | undefined {
-    const row = this.db.prepare('SELECT value FROM meta WHERE key=?').get(key) as any;
+    const row = this.stmtGetMeta.get(key) as any;
     return row ? String(row.value) : undefined;
   }
 
   setMeta(key: string, value: string): void {
-    this.db
-      .prepare('INSERT OR REPLACE INTO meta VALUES (?,?)')
-      .run(key, value);
+    this.stmtSetMeta.run(key, value);
   }
 
   stats(): any {
-    return this.db
-      .prepare(
-        'SELECT (SELECT count(*) FROM papers) papers, ' +
-        '(SELECT count(*) FROM fetch_cache) fetches, ' +
-        '(SELECT count(*) FROM classification_cache) classifications',
-      )
-      .get();
+    return this.stmtStats.get();
   }
 
   prune(days: number): number {
@@ -302,8 +338,8 @@ export class Store {
     const before = new Date(Date.now() - days * 86400000).toISOString();
     return this.transaction(() => {
       let deleted = 0;
-      deleted += Number(this.db.prepare('DELETE FROM fetch_cache WHERE fetched_at < ?').run(before).changes);
-      deleted += Number(this.db.prepare('DELETE FROM classification_cache WHERE created_at < ?').run(before).changes);
+      deleted += Number(this.stmtPruneFetches.run(before).changes);
+      deleted += Number(this.stmtPruneClassifications.run(before).changes);
       return deleted;
     });
   }
