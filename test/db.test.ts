@@ -121,6 +121,34 @@ describe('classification cache', () => {
             cleanup();
         }
     });
+
+    it('returns the newest classification timestamp among the given papers', async () => {
+        const { store, cleanup } = makeStore();
+        try {
+            expect(store.latestClassificationStamp([])).toBeUndefined();
+            expect(store.latestClassificationStamp(['2401.01234'])).toBeUndefined();
+
+            store.savePaper(paper('2401.01234'));
+            store.savePaper(paper('2401.01235'));
+            store.saveClassification('k1', paper('2401.01234'), model, result('llm-architecture'));
+            // Let the clock advance so k2's created_at is strictly newer.
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            store.saveClassification('k2', paper('2401.01235'), model, result('agent-design'));
+
+            const older = store.latestClassificationStamp(['2401.01234']);
+            const newer = store.latestClassificationStamp(['2401.01234', '2401.01235']);
+            expect(older).toBeTruthy();
+            expect(newer).toBeTruthy();
+            // The max created_at across both papers is the later k2 stamp.
+            expect(newer! >= older!).toBe(true);
+
+            // Only status='ok' rows count; a failed row never becomes the stamp.
+            store.db.exec("UPDATE classification_cache SET status='error' WHERE cache_key='k2'");
+            expect(store.latestClassificationStamp(['2401.01234', '2401.01235'])).toBe(older);
+        } finally {
+            cleanup();
+        }
+    });
 });
 
 describe('clearClassifications', () => {

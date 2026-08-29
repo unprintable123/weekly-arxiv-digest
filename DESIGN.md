@@ -163,7 +163,7 @@ pnpm site:deploy   # site:build 后把 dist/site 发布到 gh-pages 分支
 
 `run` 的 `--from`/`--to` 窗口可以跨多个 ISO 周：抓取与分类仍一次完成，但输出按每篇论文的 `published_at` 自动分片到各自 ISO 周（每周围目录、每周文档、每周 manifest 与 `generated_at` meta key），不会再整段塞进 from 周的 digest。某周没有成功分类的论文时不产生该周文件。
 
-`preview` 不读取任何快照：它按 ISO 周（`YYYY-Www`）反推周窗口，从 `papers` 表取出该周的论文并按当前 config 的缓存 key 查 `classification_cache`，然后离线重建每个 category 的 Markdown 视图。若本周没有缓存的论文或分类结果，preview 报错提示先运行 `digest run`。因为没有存档快照，preview 的 `Generated` 时间是当前时间，其余内容与对应 run 的输出一致。
+`preview` 不读取任何快照：它按 ISO 周（`YYYY-Www`）反推周窗口，从 `papers` 表取出该周的论文并按当前 config 的缓存 key 查 `classification_cache`，然后离线重建每个 category 的 Markdown 视图。若本周没有缓存的论文或分类结果，preview 报错提示先运行 `digest run`。`preview` 与 `web build` 复用 `meta` 中 `(week, config hash) -> generated_at` 的时间戳（无记录时回退到该周最新分类时间，不读时钟），因此未变化数据的 preview/web build 输出与对应 run 字节一致，重复回填不会因时间戳重读而改写文件。
 
 ## 8. 可靠性与验收标准
 

@@ -527,18 +527,16 @@ describe('previewDigest', () => {
 
             const all = previewDigest(root, cfg, '2024-W01');
             expect(all.documents).toHaveLength(2);
-            // Preview output matches the run's rendered files modulo the
-            // fresh "Generated" timestamp.
-            const stripGenerated = (text: string): string =>
-                text.replace(/- Generated: .*/g, '- Generated: X');
-            expect(stripGenerated(all.markdown)).toBe(
-                stripGenerated(contentFor(first, 'test-architecture') + contentFor(first, 'test-training')),
+            // Preview reuses the run's stored generation stamp, so the rendered
+            // markdown is byte-identical to the run output (no clock restamp).
+            expect(all.markdown).toBe(
+                contentFor(first, 'test-architecture') + contentFor(first, 'test-training'),
             );
 
             const one = previewDigest(root, cfg, '2024-W01', 'test-architecture');
             expect(one.documents).toHaveLength(1);
             expect(one.documents[0].categoryId).toBe('test-architecture');
-            expect(stripGenerated(one.markdown)).toBe(stripGenerated(contentFor(first, 'test-architecture')));
+            expect(one.markdown).toBe(contentFor(first, 'test-architecture'));
 
             // Preview never calls the agent or the network.
             expect(invoker.complete.mock.calls.length).toBe(agentCalls);
@@ -727,8 +725,8 @@ describe('web output', () => {
             // Backfill shares the preview code path: no new agent/network work.
             expect(invoker.complete.mock.calls.length).toBe(agentCalls);
 
-            // The regenerated json matches the run-written json (modulo the
-            // generatedAt stamp) once the run has also written the twins.
+            // The backfilled json matches the run-written json exactly: both
+            // reuse the stored generation stamp (no clock restamp).
             await runDigest(cfg, window(), { root, invoker });
             const direct = readFileSync(
                 join(root, 'digests-json', '2024-W01', 'weekly-2024-W01-test-architecture.json'),
@@ -736,17 +734,18 @@ describe('web output', () => {
             );
             const backfillFile = built.files.find((file) => file.endsWith('test-architecture.json'));
             expect(backfillFile).toBeTruthy();
-            // generatedAt may differ between preview and run; compare content.
-            const normalize = (text: string): string => text.replace(/"generatedAt":"[^"]*"/g, '');
-            expect(normalize(direct)).toBe(normalize(readFileSync(backfillFile!, 'utf8')));
+            expect(readFileSync(backfillFile!, 'utf8')).toBe(direct);
 
-            // Repeat backfill is byte-identical (stable ordering, same stamp
-            // within the same second is not guaranteed, so only the document
-            // shape minus generatedAt is compared).
-            const before = normalize(readFileSync(backfillFile!, 'utf8'));
+            // Repeat backfill is byte-identical: stable ordering + the same
+            // stamp keep every document and both manifests unchanged.
+            const before = readFileSync(backfillFile!, 'utf8');
+            const beforeWeekIndex = readFileSync(join(root, 'digests-json', '2024-W01', 'index.json'), 'utf8');
+            const beforeSiteIndex = readFileSync(join(root, 'digests-json', 'index.json'), 'utf8');
             const { buildWebDigests: rebuild } = await import('../src/pipeline.js');
             await rebuild(root, cfg, '2024-W01');
-            expect(normalize(readFileSync(backfillFile!, 'utf8'))).toBe(before);
+            expect(readFileSync(backfillFile!, 'utf8')).toBe(before);
+            expect(readFileSync(join(root, 'digests-json', '2024-W01', 'index.json'), 'utf8')).toBe(beforeWeekIndex);
+            expect(readFileSync(join(root, 'digests-json', 'index.json'), 'utf8')).toBe(beforeSiteIndex);
         } finally {
             rmSync(root, { recursive: true, force: true });
         }

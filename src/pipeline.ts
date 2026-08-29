@@ -87,6 +87,25 @@ function generationMetaKey(week: string, configHashValue: string): string {
     return `generated_at:${week}:${configHashValue}`;
 }
 
+/**
+ * Byte-stable generation stamp for a week: the stamp recorded by the last
+ * `run` for this week+config (meta) when present, otherwise the newest cached
+ * classification time for the week. Never reads the clock, so preview/backfill
+ * of unchanged data reproduces byte-identical output.
+ */
+function generationStamp(
+    store: Store,
+    week: string,
+    configHashValue: string,
+    classified: ClassifiedPaper[],
+): string {
+    return (
+        store.getMeta(generationMetaKey(week, configHashValue)) ??
+        store.latestClassificationStamp(classified.map((paper) => paper.arxivId)) ??
+        new Date().toISOString()
+    );
+}
+
 /** Canonical Monday-to-next-Monday window for an ISO week id. */
 function weekWindowOf(week: string): Window {
     const from = weekStart(week);
@@ -426,7 +445,7 @@ export async function runDigest(
             store.flush();
         }
         const generatedAtFor = (week: string): string =>
-            generatedStamp ?? store.getMeta(metaKey(week)) ?? new Date().toISOString();
+            generatedStamp ?? generationStamp(store, week, configHashValue, classified);
 
         const weekDocuments = new Map<string, DigestDocument[]>();
         for (const week of weeks) {
@@ -571,7 +590,10 @@ export async function buildWebDigests(
         await rename(temporary, file);
         files.push(file);
     }
-    refreshManifests(jsonDir, week, new Date().toISOString());
+    // Deterministic manifest stamp: reuse the documents' generation stamp so
+    // unchanged data reproduces byte-identical week + global manifests.
+    const generatedAt = preview.documents[0]?.generatedAt ?? new Date().toISOString();
+    refreshManifests(jsonDir, week, generatedAt);
     files.push(join(weekDir, 'index.json'), join(jsonDir, 'index.json'));
     return {
         week,
@@ -659,6 +681,11 @@ export function previewDigest(
         if (!classified.length) {
             throw new Error(`No cached classifications for ${week}; run the digest first`);
         }
+        const configHashValue = configHash(cfg);
+        // Byte-identical backfill: reuse the generation stamp stored by the
+        // last `run` for this week+config (falling back to the newest cached
+        // classification time), so repeat previews never restamp the output.
+        const generatedAt = generationStamp(store, week, configHashValue, classified);
         const documents = buildDocuments(
             classified,
             cfg.topics,
@@ -667,8 +694,8 @@ export function previewDigest(
                 to: new Date(`${to}T00:00:00Z`),
                 week,
             },
-            configHash(cfg),
-            new Date().toISOString(),
+            configHashValue,
+            generatedAt,
             papers.length,
         ).filter((document) => !categoryId || document.categoryId === categoryId);
         if (!documents.length) {

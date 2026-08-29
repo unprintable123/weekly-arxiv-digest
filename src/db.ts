@@ -262,6 +262,25 @@ export class Store {
   }
 
   /**
+   * Newest `created_at` among cached ok classifications for the given papers.
+   * Used as a deterministic fallback generation stamp for preview/backfill
+   * when the meta table has no entry for the week (e.g. a config change, or a
+   * week classified before the stamp feature existed). Runs once per week, not
+   * per paper, so the statement is built on demand instead of at construction.
+   */
+  latestClassificationStamp(paperIds: string[]): string | undefined {
+    if (!paperIds.length) return undefined;
+    const placeholders = paperIds.map(() => '?').join(',');
+    const row = this.db
+      .prepare(
+        `SELECT MAX(created_at) AS stamp FROM classification_cache
+         WHERE arxiv_id IN (${placeholders}) AND status='ok'`,
+      )
+      .get(...paperIds) as any;
+    return typeof row?.stamp === 'string' && row.stamp ? row.stamp : undefined;
+  }
+
+  /**
    * Convert a classification row to the domain result. Rows written before the
    * `tldr_json` column existed (or with an empty tldr) are treated as a cache
    * miss so stale entries never produce a paper card without a TLDR.
