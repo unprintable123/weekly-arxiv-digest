@@ -15,7 +15,7 @@ export const TLDR_MAX_CHARS = 200;
  * Fixed number of papers per classification LLM call. Batching only changes
  * prompt construction; per-paper cache keys and stored results are unchanged.
  */
-export const CLASSIFICATION_BATCH_SIZE = 10;
+export const CLASSIFICATION_BATCH_SIZE = 8;
 
 /**
  * Version of the built-in chat-completion client. Part of the classification
@@ -72,7 +72,7 @@ export class ChatCompletionClient implements LlmInvoker {
                 body: JSON.stringify({
                     model: opts.model,
                     messages: [{ role: 'user', content: prompt }],
-                    temperature: 0,
+                    temperature: 0.3,
                     reasoning_effort: "low"
                 }),
                 signal: controller.signal,

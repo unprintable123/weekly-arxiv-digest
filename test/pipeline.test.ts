@@ -579,6 +579,75 @@ describe('web output', () => {
         }
     });
 
+    it('shards a multi-week window into one digest per ISO week', async () => {
+        const root = makeRoot();
+        try {
+            const cfg = await loadRootConfig(root);
+            // The fixture also carries 2401.01236 ("Out-of-Window Paper") on
+            // 2024-01-09, which is inside the wider window and lands in W02.
+            const invoker = {
+                complete: vi.fn(async (prompt: string) => {
+                    const entries: { id: string; categories: string[]; tags: string[]; tldr: string }[] = [];
+                    if (prompt.includes('Attention Is All You Need')) {
+                        entries.push({ id: '2401.01234', categories: ['test-architecture', 'test-training'], tags: ['attention'], tldr: '提出可扩展的注意力机制。' });
+                    }
+                    if (prompt.includes('Mixture of Experts')) {
+                        entries.push({ id: '2401.01235', categories: ['test-architecture'], tags: ['mixture-of-experts'], tldr: '研究混合专家模型的可扩展性。' });
+                    }
+                    if (prompt.includes('Out-of-Window Paper')) {
+                        entries.push({ id: '2401.01236', categories: ['test-architecture'], tags: ['out-of-window'], tldr: '第二周的一篇论文。' });
+                    }
+                    if (!entries.length) {
+                        entries.push({ id: 'unknown-paper', categories: ['other'], tags: [], tldr: '未知论文。' });
+                    }
+                    return JSON.stringify(entries);
+                }),
+            };
+            stubCrawl();
+
+            // W01 + W02 window: two papers land in 2024-W01, one in 2024-W02.
+            const result = await runDigest(cfg, weekWindow('2024-01-01', '2024-01-16'), { root, invoker });
+            expect(result.errors).toBe(0);
+            expect(result.status).toBe('ok');
+
+            // Files are sharded into per-week subfolders.
+            const mdFiles = result.files
+                .filter((file) => file.endsWith('.md'))
+                .map((file) => file.split('\\').pop() ?? file)
+                .sort();
+            expect(mdFiles).toEqual([
+                'weekly-2024-W01-test-architecture.md',
+                'weekly-2024-W01-test-training.md',
+                'weekly-2024-W02-test-architecture.md',
+            ]);
+
+            // W02 digest contains only the second-week paper.
+            const w02 = result.files.find(
+                (file) => file.endsWith('.md') && file.includes(join('digests', '2024-W02')) && file.endsWith('-test-architecture.md'),
+            )!;
+            const w02Md = readFileSync(w02, 'utf8');
+            // Titles are markdown-escaped (hyphens), so assert on arXiv ids.
+            expect(w02Md).toContain('2401.01236');
+            expect(w02Md).not.toContain('2401.01234');
+            expect(w02Md).not.toContain('2401.01235');
+
+            // W01 digest keeps the two original papers and no W02 paper.
+            const w01 = result.files.find(
+                (file) => file.endsWith('.md') && file.includes(join('digests', '2024-W01')) && file.endsWith('-test-architecture.md'),
+            )!;
+            const w01Md = readFileSync(w01, 'utf8');
+            expect(w01Md).toContain('2401.01234');
+            expect(w01Md).toContain('2401.01235');
+            expect(w01Md).not.toContain('2401.01236');
+
+            // Documents carry their own week; no stray week folder is created.
+            expect(result.documents.map((document) => document.week).sort()).toEqual(['2024-W01', '2024-W01', '2024-W02']);
+            expect(existsSync(join(root, 'digests', '2024-W03'))).toBe(false);
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it('buildWebDigests backfills the site data offline from caches', async () => {
         const root = makeRoot();
         try {

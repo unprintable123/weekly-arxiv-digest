@@ -199,7 +199,7 @@ describe('ChatCompletionClient', () => {
         };
         expect(body.model).toBe('test-model');
         expect(body.messages).toEqual([{ role: 'user', content: 'the prompt' }]);
-        expect(body.temperature).toBe(0);
+        expect(body.temperature).toBe(0.3);
         expect(body.reasoning_effort).toBe('low');
     });
 

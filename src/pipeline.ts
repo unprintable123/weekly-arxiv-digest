@@ -22,6 +22,7 @@ import type {
     Window,
 } from './types.js';
 import { chunk, hash } from './util.js';
+import { isoWeekOf } from './window.js';
 
 export interface RunOptions {
     root: string;
@@ -83,6 +84,18 @@ function sortPapers(papers: ClassifiedPaper[]): ClassifiedPaper[] {
  */
 function generationMetaKey(week: string, configHashValue: string): string {
     return `generated_at:${week}:${configHashValue}`;
+}
+
+/** Canonical Monday-to-next-Monday window for an ISO week id. */
+function weekWindowOf(week: string): Window {
+    const from = weekStart(week);
+    if (!from) throw new Error(`Invalid week: ${week}`);
+    const fromDate = new Date(`${from}T00:00:00Z`);
+    return {
+        from: fromDate,
+        to: new Date(fromDate.getTime() + 7 * 86400000),
+        week,
+    };
 }
 
 /** Group classified papers into one document per non-empty category. */
@@ -236,10 +249,10 @@ export async function runDigest(
         const classifyMs = Date.now();
         const batches = chunk(pending, CLASSIFICATION_BATCH_SIZE);
         // New classification rows are serialized at a fixed cadence instead of
-        // per statement or once per stage: every 100 LLM results trigger one
+        // per statement or once per stage: every 50 LLM results trigger one
         // snapshot so a long run keeps its recent work durable without turning
         // each insert into a full-file rewrite. Cache-hit reads issue no flush.
-        const FLUSH_INTERVAL = 100;
+        const FLUSH_INTERVAL = 50;
         let unsaved = 0;
         const checkpoint = () => {
             unsaved += 1;
@@ -354,73 +367,98 @@ export async function runDigest(
                 .map((paper) => ({ ...paper, classification: results.get(paper.arxivId)! })),
         );
 
+        // Shard the requested window into one digest per ISO week of each
+        // paper's publication date, so a multi-week --from/--to run no longer
+        // dumps every paper into the from-week. Weeks are sorted for stable
+        // output; a week with no classified papers produces no folder.
+        const byWeek = new Map<string, ClassifiedPaper[]>();
+        const weekCandidates = new Map<string, number>();
+        for (const paper of papers.values()) {
+            const week = isoWeekOf(paper.publishedAt);
+            if (!week) continue;
+            weekCandidates.set(week, (weekCandidates.get(week) ?? 0) + 1);
+        }
+        for (const paper of classified) {
+            const week = isoWeekOf(paper.publishedAt);
+            if (!week) continue;
+            const list = byWeek.get(week) ?? [];
+            list.push(paper);
+            byWeek.set(week, list);
+        }
+        const weeks = [...byWeek.keys()].sort();
+
         // Byte-identical output on replay: when this run made no new network or
         // agent work, reuse the previous generation time stored in the meta
         // table (keyed by week + config hash) so repeat runs reproduce files.
         const didWork = newFetches || newClassifications > 0;
-        const metaKey = generationMetaKey(window.week, configHashValue);
-        let generatedAt: string;
+        const metaKey = (week: string) => generationMetaKey(week, configHashValue);
+        let generatedStamp: string | undefined;
         if (didWork) {
-            generatedAt = new Date().toISOString();
-            store.setMeta(metaKey, generatedAt);
+            generatedStamp = new Date().toISOString();
+            for (const week of weeks) store.setMeta(metaKey(week), generatedStamp);
             store.flush();
-        } else {
-            generatedAt = store.getMeta(metaKey) ?? new Date().toISOString();
         }
+        const generatedAtFor = (week: string): string =>
+            generatedStamp ?? store.getMeta(metaKey(week)) ?? new Date().toISOString();
 
-        const documents = buildDocuments(
-            classified,
-            taxonomy,
-            window,
-            configHashValue,
-            generatedAt,
-            papers.size,
-        );
+        const weekDocuments = new Map<string, DigestDocument[]>();
+        for (const week of weeks) {
+            weekDocuments.set(
+                week,
+                buildDocuments(
+                    byWeek.get(week)!,
+                    taxonomy,
+                    weekWindowOf(week),
+                    configHashValue,
+                    generatedAtFor(week),
+                    weekCandidates.get(week) ?? 0,
+                ),
+            );
+        }
+        const documents = [...weekDocuments.values()].flat();
         const status = errors > 0 || crawlErrorCount > 0 ? 'error' : 'ok';
 
         if (!opts.dryRun) {
             const outDir = join(opts.root, cfg.output.directory);
             const jsonDir = join(opts.root, cfg.output.json_directory);
-            // Two-level layout: one `{week}` subfolder (e.g. "2026-W34") per week.
-            const weekDir = join(
-                outDir,
-                cfg.output.subdirectory.replace('{week}', window.week),
-            );
-            // JSON twins live in their own tree (same relative layout) so a
-            // repository can publish the JSON feed without the Markdown files.
-            const jsonWeekDir = join(
-                jsonDir,
-                cfg.output.subdirectory.replace('{week}', window.week),
-            );
-            await mkdir(weekDir, { recursive: true });
-            await mkdir(jsonWeekDir, { recursive: true });
             const renderer = new MarkdownRenderer();
             const jsonRenderer = new JsonRenderer();
             const files: string[] = [];
-            for (const document of documents) {
-                const markdown = renderer.render(document);
-                const webJson = jsonRenderer.render(document);
-                const base = cfg.output.filename
-                    .replace('{week}', window.week)
-                    .replace('{category}', document.categoryId);
-                const file = join(weekDir, base);
-                // Atomic write: temp file + rename so readers never see partial output.
-                const temporary = `${file}.tmp`;
-                await writeFile(temporary, markdown, 'utf8');
-                await rename(temporary, file);
-                files.push(file);
-                // Web twin: same basename, in the separate json_directory tree.
-                const jsonFile = join(jsonWeekDir, `${base.slice(0, -(renderer.extension.length + 1))}.json`);
-                const jsonTemporary = `${jsonFile}.tmp`;
-                await writeFile(jsonTemporary, webJson, 'utf8');
-                await rename(jsonTemporary, jsonFile);
-                files.push(jsonFile);
+            for (const week of weeks) {
+                // Two-level layout: one `{week}` subfolder (e.g. "2026-W34") per week.
+                const weekDir = join(outDir, cfg.output.subdirectory.replace('{week}', week));
+                // JSON twins live in their own tree (same relative layout) so a
+                // repository can publish the JSON feed without the Markdown files.
+                const jsonWeekDir = join(jsonDir, cfg.output.subdirectory.replace('{week}', week));
+                await mkdir(weekDir, { recursive: true });
+                await mkdir(jsonWeekDir, { recursive: true });
+                const generatedAt = generatedAtFor(week);
+                for (const document of weekDocuments.get(week)!) {
+                    const markdown = renderer.render(document);
+                    const webJson = jsonRenderer.render(document);
+                    const base = cfg.output.filename
+                        .replace('{week}', week)
+                        .replace('{category}', document.categoryId);
+                    const file = join(weekDir, base);
+                    // Atomic write: temp file + rename so readers never see partial output.
+                    const temporary = `${file}.tmp`;
+                    await writeFile(temporary, markdown, 'utf8');
+                    await rename(temporary, file);
+                    files.push(file);
+                    // Web twin: same basename, in the separate json_directory tree.
+                    const jsonFile = join(jsonWeekDir, `${base.slice(0, -(renderer.extension.length + 1))}.json`);
+                    const jsonTemporary = `${jsonFile}.tmp`;
+                    await writeFile(jsonTemporary, webJson, 'utf8');
+                    await rename(jsonTemporary, jsonFile);
+                    files.push(jsonFile);
+                }
+                // Manifests are derived by scanning the written JSON documents, so
+                // they stay correct no matter which subset of weeks/categories exists.
+                refreshManifests(jsonDir, week, generatedAt);
             }
-            // Manifests are derived by scanning the written JSON documents, so
-            // they stay correct no matter which subset of weeks/categories exists.
-            refreshManifests(jsonDir, window.week, generatedAt);
             logger.info('run_end', {
                 status,
+                weeks: weeks.length,
                 candidates: papers.size,
                 classified: classified.length,
                 categories: documents.length,
@@ -434,6 +472,7 @@ export async function runDigest(
         logger.info('run_end', {
             status,
             dry_run: true,
+            weeks: weeks.length,
             candidates: papers.size,
             classified: classified.length,
             categories: documents.length,

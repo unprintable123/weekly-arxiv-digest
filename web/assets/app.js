@@ -123,11 +123,12 @@ function matchesSearch(text) {
  */
 function renderCard(paper) {
     const arxivHref = safeHref(`https://arxiv.org/abs/${paper.arxivId}`);
+    const pdfHref = safeHref(`https://arxiv.org/pdf/${paper.arxivId}`);
 
     const title = element(
         'h3',
         ['text-base', 'font-semibold', 'leading-snug', 'tracking-tight'],
-        [paper.title],
+        [linkOrText(paper.title, pdfHref)],
     );
 
     const tags = paper.classification.tags.map((tag) =>

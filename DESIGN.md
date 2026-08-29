@@ -161,6 +161,8 @@ pnpm site:deploy   # site:build 后把 dist/site 发布到 gh-pages 分支
 
 `run` 的 stdout 输出 `files`、`categories` 和 `stats`（无 run ID，因为不再记录运行行）。抓取或分类失败通过 JSON lines 日志报告并返回非零退出码；失败不会被写库，直接重新 `run` 即可重试（失败的论文没有缓存条目，会自动重新分类），`--force` 用于强制重新抓取和重新分类。
 
+`run` 的 `--from`/`--to` 窗口可以跨多个 ISO 周：抓取与分类仍一次完成，但输出按每篇论文的 `published_at` 自动分片到各自 ISO 周（每周围目录、每周文档、每周 manifest 与 `generated_at` meta key），不会再整段塞进 from 周的 digest。某周没有成功分类的论文时不产生该周文件。
+
 `preview` 不读取任何快照：它按 ISO 周（`YYYY-Www`）反推周窗口，从 `papers` 表取出该周的论文并按当前 config 的缓存 key 查 `classification_cache`，然后离线重建每个 category 的 Markdown 视图。若本周没有缓存的论文或分类结果，preview 报错提示先运行 `digest run`。因为没有存档快照，preview 的 `Generated` 时间是当前时间，其余内容与对应 run 的输出一致。
 
 ## 8. 可靠性与验收标准
