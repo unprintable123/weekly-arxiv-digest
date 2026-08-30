@@ -41,11 +41,11 @@ groups:
     topics:
       - id: llm-architecture
         name: 大模型架构
-        description: Transformer 变体、注意力、MoE、状态空间、残差和归一化等结构创新；不包含单纯训练技巧，如果在优化模型效率的同时引入了新架构（例如sparse attention）也算作architecture。
+        description: Transformer 变体、注意力、MoE、状态空间、残差和归一化等结构创新；不包含单纯训练技巧，如果在优化模型效率的同时引入了新架构（例如sparse attention）也算作architecture。不包括lora等参数高效微调方法，归入 llm-training。
         tags: [transformer, attention, state-space-model, mixture-of-experts, recurrent-model, positional-encoding, sparse-attention]
       - id: llm-training
         name: 大模型训练与微调
-        description: 预训练目标、SFT、参数高效微调、优化策略和训练配方；理论规律优先使用 physics-of-llm。
+        description: 预训练目标、SFT、参数高效微调（例如lora）、优化策略和训练配方；理论规律优先使用 physics-of-llm。
         tags: [pretraining, sft, parameter-efficient-finetuning, lora, continual-learning, optimizer]
       - id: physics-of-llm
         name: 大模型训练物理与涌现规律
@@ -69,7 +69,7 @@ groups:
         tags: [grpo, ppo, reinforcement-learning, process-reward, outcome-reward, verifiable-reward]
       - id: llm-interpret
         name: 可解释性与机理
-        description: Mechanistic interpretability、内部表征、电路、神经元/特征归因和行为机制。
+        description: Mechanistic interpretability、内部表征、电路、神经元/特征归因和行为机制，也包括分析模型架构的实际激活模式和行为。
         tags: [mechanistic-interpretability, representation-analysis, activation-patching, circuit-analysis, feature-attribution, sparse-autoencoder]
       - id: llm-alignment
         name: 模型对齐
