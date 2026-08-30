@@ -34,7 +34,6 @@ const el = {
     weekSelect: document.getElementById('week-select'),
     groupSelect: document.getElementById('group-select'),
     categorySelect: document.getElementById('category-select'),
-    countBadge: document.getElementById('count-badge'),
     searchInput: document.getElementById('search-input'),
     themeToggle: document.getElementById('theme-toggle'),
     iconSun: document.getElementById('icon-sun'),
@@ -273,8 +272,6 @@ function renderMeta() {
     }
     el.metaLine.textContent = `Window: ${webDocument.from} to ${webDocument.to} (UTC) · Candidates: ${webDocument.candidateCount} · Papers: ${state.document.papers?.length ?? 0}`;
     el.footerMeta.textContent = `config ${String(webDocument.configHash).slice(0, 12)} · doc v${webDocument.version}`;
-    el.countBadge.textContent = `${state.document.papers?.length ?? 0} papers`;
-    el.countBadge.classList.remove('hidden');
     // Document title keeps the Chinese category name (from the week index)
     // while the selects show English ids.
     const selected = (state.weekCategories ?? []).find((entry) => entry.id === webDocument.categoryId);
