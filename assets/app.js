@@ -195,7 +195,7 @@ function renderCard(paper) {
             document.createTextNode(paper.classification.categories.join(', ') || paper.categories.join(', ')),
         ]),
         paper.authors.length
-            ? element('div', [], [element('span', ['font-semibold', 'text-slate-600', 'dark:text-slate-300'], ['Authors: ']), document.createTextNode(paper.authors.join(', '))])
+            ? element('div', [], [element('span', ['font-semibold', 'text-slate-600', 'dark:text-slate-300'], ['Authors: ']), document.createTextNode(paper.authors.slice(0, 20).join(', ') + (paper.authors.length > 20 ? '...' : ''))])
             : element('div', [], ['Authors: Unknown']),
         element('div', [], [
             element('span', ['font-semibold', 'text-slate-600', 'dark:text-slate-300'], ['arXiv: ']),
